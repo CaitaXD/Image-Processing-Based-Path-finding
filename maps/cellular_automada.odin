@@ -4,15 +4,19 @@ import "base:runtime"
 import "core:math/rand"
 import "../grid"
 
+OBSTACLE :: u8(0)
+WALKABLE :: u8(1)
+
 cellular_automata :: proc(dims: [2]int, seed: int, obstacle_rate:f32=0.45, relaxation_steps := 5) -> (g: grid.Grid2D(u8), err: runtime.Allocator_Error) #optional_allocator_error {
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
     r := rand.create(u64(seed))
+    gen := runtime.default_random_generator(&r)
     g = grid.make(u8, dims[0], dims[1]) or_return
     for i in 0..<dims[0] {
         for j in 0..<dims[1] {
-            noise := rand.float32()
+            noise := rand.float32(gen)
             if noise >= obstacle_rate {
-                grid.colmaj(g, i, j)^ = u8(1)
+                grid.colmaj(g, i, j)^ = WALKABLE
             }
         }
     }
@@ -29,10 +33,10 @@ cellular_automata :: proc(dims: [2]int, seed: int, obstacle_rate:f32=0.45, relax
                 current   := grid.at(src^, x, y)^
                 
                 if neighbors > 4 {
-                    grid.at(dst^, x, y)^ = 1
+                    grid.at(dst^, x, y)^ = WALKABLE
                 }
                 else if neighbors < 4 {
-                    grid.at(dst^, x, y)^ = 0
+                    grid.at(dst^, x, y)^ = OBSTACLE
                 } 
                 else {
                     grid.at(dst^, x, y)^ = current 
