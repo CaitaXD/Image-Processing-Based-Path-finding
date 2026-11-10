@@ -81,3 +81,18 @@ convolution :: proc(kernel: Kernel, g: grid.Grid2D($T), repeat := 1) -> (out: gr
 
     return
 }
+
+sum :: proc(g: grid.Grid2D($T), x, y: int, radious := 1) -> T where NUMERIC(T) {
+    sum :T= 0
+    for i in -radious..=radious {
+        for j in -radious..=radious {
+            if i == 0 && j == 0 do continue
+            nx := x + i
+            ny := y + j
+            if nx >= 0 && nx < g.width && ny >= 0 && ny < g.height {
+                sum += grid.at(g, nx, ny)^
+            }
+        }
+    }
+    return sum
+}

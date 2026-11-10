@@ -12,7 +12,7 @@ UNIT_COUNT :: 10000
 ZOOM_MAX :: 64.0
 ZOOM_STEP :: 1.2
 
-W :: 2*1024
+W :: 1024
 H :: 1024
 
 main :: proc() {
@@ -51,11 +51,6 @@ main :: proc() {
         camera.offset = screen / 2
         camera.zoom = clamp(camera.zoom, min_zoom, ZOOM_MAX)
 
-        if rl.IsKeyPressed(.ZERO) {
-            camera.zoom = min_zoom
-            camera.target = {f32(dims[0]) / 2, f32(dims[1]) / 2}
-        }
-
         if wheel := rl.GetMouseWheelMove(); wheel != 0 {
             zoom_at(&camera, rl.GetMousePosition(), math.pow(ZOOM_STEP, wheel), min_zoom, ZOOM_MAX)
         }
@@ -93,7 +88,7 @@ main :: proc() {
         rl.EndMode2D()
 
         rl.DrawText(rl.TextFormat("zoom: %.2fx", camera.zoom), 10, 10, 20, rl.WHITE)
-        rl.DrawText("Wheel: zoom   RMB/MMB: pan   0: reset   R: regenerate", 10, 34, 16, rl.LIGHTGRAY)
+        rl.DrawText("Wheel: zoom   RMB/MMB: pan   R: regenerate", 10, 34, 16, rl.LIGHTGRAY)
 
         rl.EndDrawing()
     }
