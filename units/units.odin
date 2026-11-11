@@ -6,7 +6,7 @@ import "../grid"
 import "../maps"
 
 Unit :: struct {
-    pos: [2]int,
+    pos: [2]f32,
 }
 
 Goal :: struct {
@@ -27,7 +27,7 @@ sample :: proc(obstacles: grid.Grid2D(u8), n: int, seed: u64, allocator := conte
     for i in 0..<picked {
         j := rand.int_range(i, len(cells), gen)
         cells[i], cells[j] = cells[j], cells[i]
-        u[i].pos = cells[i]
+        u[i].pos = {f32(cells[i][0]) + 0.5, f32(cells[i][1]) + 0.5}
     }
     return
 }

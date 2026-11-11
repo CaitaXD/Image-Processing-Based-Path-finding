@@ -21,12 +21,12 @@ sample_deterministic :: proc(t: ^testing.T) {
     assert(len(b) == 100)
 
     for i in 0..<len(a) {
-        assert(a[i].pos[0] == b[i].pos[0] && a[i].pos[1] == b[i].pos[1],
+        assert(a[i].pos == b[i].pos,
             "same seed must produce identical placements")
     }
 
     for unit in a {
-        assert(grid.at(m, unit.pos[0], unit.pos[1])^ == maps.WALKABLE,
+        assert(grid.at(m, int(unit.pos[0]), int(unit.pos[1]))^ == maps.WALKABLE,
             "unit must sit on a walkable cell")
     }
 

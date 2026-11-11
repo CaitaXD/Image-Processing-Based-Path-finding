@@ -58,6 +58,100 @@ step :: proc(s: ^HeatSolver, goals: []Goal, substeps: int) {
     }
 }
 
+// Builds the source term once so it can be added every step without recomputing
+// the Gaussian. Useful when a broad source is needed for navigation fields.
+make_source :: proc(walls: gd.Grid2D(u8), goal: Goal, sigma, strength: f32, allocator := context.allocator) -> (src: gd.Grid2D(f32), err: runtime.Allocator_Error) {
+    src, err = gd.make(f32, walls.width, walls.height, allocator)
+    if err != nil {
+        return
+    }
+
+    weight := max(goal.weight, f32(0))
+    if weight == 0 || strength <= 0 {
+        return
+    }
+
+    if sigma <= 0 {
+        x := int(goal.pos[0])
+        y := int(goal.pos[1])
+        if x >= 0 && x < src.width && y >= 0 && y < src.height &&
+           gd.at(walls, x, y)^ == maps.WALKABLE {
+            gd.at(src, x, y)^ = weight * strength
+        }
+        return
+    }
+
+    radius := sigma * 3
+    x0 := max(int(goal.pos[0] - radius), 0)
+    x1 := min(int(goal.pos[0] + radius) + 1, src.width - 1)
+    y0 := max(int(goal.pos[1] - radius), 0)
+    y1 := min(int(goal.pos[1] + radius) + 1, src.height - 1)
+    if x0 > x1 || y0 > y1 {
+        return
+    }
+
+    two_sigma_sq := 2 * sigma * sigma
+
+    kernel_sum: f32
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if gd.at(walls, x, y)^ != maps.WALKABLE {
+                continue
+            }
+            dx := (f32(x) + 0.5) - goal.pos[0]
+            dy := (f32(y) + 0.5) - goal.pos[1]
+            kernel_sum += math.exp(-(dx*dx + dy*dy) / two_sigma_sq)
+        }
+    }
+    if kernel_sum <= 0 {
+        return
+    }
+
+    scale := weight * strength / kernel_sum
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if gd.at(walls, x, y)^ != maps.WALKABLE {
+                continue
+            }
+            dx := (f32(x) + 0.5) - goal.pos[0]
+            dy := (f32(y) + 0.5) - goal.pos[1]
+            gd.at(src, x, y)^ = scale * math.exp(-(dx*dx + dy*dy) / two_sigma_sq)
+        }
+    }
+
+    return
+}
+
+seed_source :: proc(s: ^HeatSolver, source: gd.Grid2D(f32)) {
+    assert(source.width == s.field.width && source.height == s.field.height)
+
+    if s.decay > 0 {
+        inv_decay := 1 / s.decay
+        for i in 0..<len(s.field.data) {
+            s.field.data[i] = source.data[i] * inv_decay
+        }
+    } else {
+        copy(s.field.data, source.data)
+    }
+}
+
+step_with_source :: proc(s: ^HeatSolver, source: gd.Grid2D(f32), substeps: int) {
+    if substeps <= 0 {
+        return
+    }
+    assert(source.width == s.field.width && source.height == s.field.height)
+
+    for _ in 0..<substeps {
+        diffuse(s)
+
+        for i in 0..<len(s.tmp.data) {
+            s.tmp.data[i] += source.data[i]
+        }
+
+        s.field, s.tmp = s.tmp, s.field
+    }
+}
+
 @(private)
 diffuse :: proc(s: ^HeatSolver) {
     rate  := clamp(s.rate, 0, 1)
