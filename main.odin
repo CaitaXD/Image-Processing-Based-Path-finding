@@ -8,8 +8,10 @@ import "units"
 import "nav"
 import rl "vendor:raylib"
 
-W :: 200
-H :: 200
+W :: 400
+H :: 400
+
+WINDOW_SCALE :: 2
 
 SEED                 :: 42
 UNIT_COUNT           :: 100
@@ -23,115 +25,63 @@ MAX_MOVE_STEP        :: 0.25
 GOAL_RADIUS          :: 1.0
 ZOOM_MAX             :: 64.0
 ZOOM_STEP            :: 1.2
-FPS                  :: 5
+FPS                  :: 10
+SIM_DT               :: f32(1.0 / FPS)
 
 Visualization :: enum {
     NONE,
     HEAT,
 }
 
+VISUALIZATIONS :: [?]Visualization{.NONE, .HEAT}
+VISUALIZATION_COUNT :: len(VISUALIZATIONS)
+
 main :: proc() {
-    rl.InitWindow(W, H, "Caverns")
+    rl.InitWindow(W * WINDOW_SCALE, H * WINDOW_SCALE, "Caverns")
     defer rl.CloseWindow()
     rl.SetTargetFPS(FPS)
 
-    dims := [2]int{auto_cast(rl.GetScreenWidth()), auto_cast(rl.GetScreenHeight())}
-
-    generation  := 0
-    cavern_grid := maps.cellular_automata(dims, SEED)
-    all_units   := units.sample(cavern_grid, UNIT_COUNT, cast(u64)(SEED))
-    goal, has_goal := units.sample_goal(cavern_grid, cast(u64)(SEED) + 1)
-
-    heat_solver := conv.heat(
-        cavern_grid,
-        HEAT_RATE,
-        HEAT_DECAY,
-        HEAT_SOURCE_RADIUS,
-        HEAT_SOURCE_STRENGTH,
-    )
-    heat_goals: [1]conv.Goal
-    if has_goal {
-        heat_goals[0] = conv.Goal {
-            pos    = {f32(goal.pos[0]) + 0.5, f32(goal.pos[1]) + 0.5},
-            weight = 1,
-        }
-    }
-
-    nav_source, source_err := conv.make_source(
-        cavern_grid,
-        heat_goals[0],
-        HEAT_SOURCE_RADIUS,
-        HEAT_SOURCE_STRENGTH,
-    )
-    assert(source_err == .None)
-    conv.seed_source(&heat_solver, nav_source)
-
-    flow, flow_err := nav.make(cavern_grid)
-    assert(flow_err == .None)
-    nav.update(&flow, &heat_solver)
-
-    heat_img := rl.GenImageColor(cast(i32)dims[0], cast(i32)dims[1], rl.BLACK)
-    heat_tex := rl.LoadTextureFromImage(heat_img)
-    rl.SetTextureFilter(heat_tex, .POINT)
+    dims := [2]int{W, H}
+    sim := simulation_make(dims, 0)
     defer {
-        rl.UnloadTexture(heat_tex)
-        rl.UnloadImage(heat_img)
+        rl.UnloadTexture(sim.map_tex)
+        rl.UnloadTexture(sim.heat_tex)
+        rl.UnloadImage(sim.heat_img)
     }
 
     running := true
     active_visualization := Visualization.NONE
-
-    tex := map_texture(cavern_grid)
-    defer rl.UnloadTexture(tex)
+    recorder: Recorder
+    defer record_stop(&recorder)
 
     camera := rl.Camera2D {
         target = {f32(dims[0]) / 2, f32(dims[1]) / 2},
         zoom   = 1,
     }
+    record_camera: rl.Camera2D
 
     for !rl.WindowShouldClose() {
-        if rl.IsKeyPressed(.R) {
-            generation += 1
-            seed := SEED + generation
-
-            cavern_grid = maps.cellular_automata(dims, seed)
-            all_units = units.sample(cavern_grid, UNIT_COUNT, cast(u64)(seed))
-            goal, has_goal = units.sample_goal(cavern_grid, cast(u64)(seed) + 1)
-
-            heat_solver = conv.heat(
-                cavern_grid,
-                HEAT_RATE,
-                HEAT_DECAY,
-                HEAT_SOURCE_RADIUS,
-                HEAT_SOURCE_STRENGTH,
-            )
-            heat_goals[0] = {}
-            if has_goal {
-                heat_goals[0] = conv.Goal {
-                    pos    = {f32(goal.pos[0]) + 0.5, f32(goal.pos[1]) + 0.5},
-                    weight = 1,
-                }
-            }
-
-            nav_source, source_err = conv.make_source(
-                cavern_grid,
-                heat_goals[0],
-                HEAT_SOURCE_RADIUS,
-                HEAT_SOURCE_STRENGTH,
-            )
-            assert(source_err == .None)
-            conv.seed_source(&heat_solver, nav_source)
-
-            flow, flow_err = nav.make(cavern_grid)
-            assert(flow_err == .None)
-            nav.update(&flow, &heat_solver)
-
-            rl.UnloadTexture(tex)
-            tex = map_texture(cavern_grid)
+        if rl.IsKeyPressed(.R) && !recorder.active {
+            simulation_regenerate(&sim)
         }
 
         if rl.IsKeyPressed(.P) {
             running = !running
+        }
+
+        if rl.IsKeyPressed(.V) {
+            if recorder.active {
+                record_stop(&recorder)
+            } else {
+                simulation_reset(&sim)
+                running = true
+                record_camera = rl.Camera2D {
+                    target = {f32(dims[0]) / 2, f32(dims[1]) / 2},
+                    offset = {f32(RECORD_WIDTH) / 2, f32(RECORD_HEIGHT) / 2},
+                    zoom   = max(min(f32(RECORD_WIDTH) / f32(dims[0]), f32(RECORD_HEIGHT) / f32(dims[1])), 0.001),
+                }
+                _ = record_start(&recorder)
+            }
         }
 
         if rl.IsKeyPressed(.ZERO) {
@@ -141,13 +91,13 @@ main :: proc() {
             active_visualization = .HEAT
         }
 
-        if running || rl.IsKeyPressed(.SPACE) {
-            conv.step_with_source(&heat_solver, nav_source, HEAT_SUBSTEPS)
-            nav.update(&flow, &heat_solver)
-            update_units(all_units, cavern_grid, &flow, goal, has_goal, rl.GetFrameTime())
+        if running || recorder.active || rl.IsKeyPressed(.SPACE) {
+            if !(recorder.active && recorder.frames == 0) {
+                simulation_step(&sim, SIM_DT)
+            }
         }
-        if active_visualization == .HEAT {
-            update_heat_texture(heat_tex, &heat_img, &heat_solver)
+        if recorder.active || active_visualization == .HEAT {
+            simulation_update_heat_texture(&sim)
         }
 
         screen := [2]f32{f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
@@ -170,35 +120,18 @@ main :: proc() {
         rl.BeginDrawing()
         rl.ClearBackground({0x18, 0x18, 0x18, 255})
 
-        rl.BeginMode2D(camera)
-        rl.DrawTextureEx(tex, {0, 0}, 0, 1, rl.WHITE)
-        switch active_visualization {
-        case .NONE:
-        case .HEAT:
-            rl.DrawTextureEx(heat_tex, {0, 0}, 0, 1, rl.WHITE)
+        if recorder.active {
+            record_capture(&recorder, &sim, record_camera)
         }
 
-        unit_size := max(1, 2 / camera.zoom)
-        for unit in all_units {
-            pos := [2]f32{
-                unit.pos[0] - unit_size / 2,
-                unit.pos[1] - unit_size / 2,
-            }
-            rl.DrawRectangleV(pos, {unit_size, unit_size}, rl.RED)
-        }
-
-        if has_goal {
-            goal_size := max(1, 4 / camera.zoom)
-            goal_pos := [2]f32{
-                f32(goal.pos[0]) + 0.5 - goal_size / 2,
-                f32(goal.pos[1]) + 0.5 - goal_size / 2,
-            }
-            rl.DrawRectangleV(goal_pos, {goal_size, goal_size}, rl.GREEN)
-        }
-        rl.EndMode2D()
+        simulation_draw(&sim, active_visualization, camera)
 
         rl.DrawText(rl.TextFormat("zoom: %.2fx", camera.zoom), 10, 10, 20, rl.WHITE)
-        rl.DrawText("Wheel: zoom   RMB/MMB: pan   Space: step   P: run/pause   R: regenerate   0: none   1: heat/nav", 10, 34, 16, rl.LIGHTGRAY)
+        rl.DrawText("Wheel: zoom   RMB/MMB: pan   Space: step   P: run/pause   R: regenerate   V: record all views from start   0: none   1: heat/nav", 10, 34, 16, rl.LIGHTGRAY)
+        if recorder.active {
+            label := rl.TextFormat("REC all views %d/%d", recorder.frames, RECORD_SECONDS * FPS)
+            rl.DrawText(label, 10, 58, 16, rl.RED)
+        }
 
         rl.EndDrawing()
     }

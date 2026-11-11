@@ -21,9 +21,7 @@ gradient_points_uphill :: proc(t: ^testing.T) {
     walls := make_walls(9, 9)
     defer delete(walls.data)
 
-    s, err := conv.heat(walls, 0.5, 0.0005, 1, 1)
-    assert(err == .None)
-    defer conv.destroy(&s)
+    s := conv.heat(walls, 0.5, 0.0005, 1, 1, context.temp_allocator)
 
     for y in 0..<walls.height {
         for x in 0..<walls.width {
@@ -31,10 +29,7 @@ gradient_points_uphill :: proc(t: ^testing.T) {
         }
     }
 
-    f, flow_err := make(walls)
-    assert(flow_err == .None)
-    defer destroy(&f)
-
+    f := make(walls, context.temp_allocator)
     update(&f, &s)
 
     dir := sample(&f, {4.5, 4.5})
@@ -48,9 +43,7 @@ walls_do_not_create_normal_gradient :: proc(t: ^testing.T) {
 
     grid.at(walls, 5, 4)^ = maps.OBSTACLE
 
-    s, err := conv.heat(walls, 0.5, 0.0005, 1, 1)
-    assert(err == .None)
-    defer conv.destroy(&s)
+    s := conv.heat(walls, 0.5, 0.0005, 1, 1, context.temp_allocator)
 
     for y in 0..<walls.height {
         for x in 0..<walls.width {
@@ -58,10 +51,7 @@ walls_do_not_create_normal_gradient :: proc(t: ^testing.T) {
         }
     }
 
-    f, flow_err := make(walls)
-    assert(flow_err == .None)
-    defer destroy(&f)
-
+    f := make(walls, context.temp_allocator)
     update(&f, &s)
 
     dir := sample(&f, {4.5, 4.5})
@@ -77,12 +67,10 @@ sample_interpolates_directions :: proc(t: ^testing.T) {
     walls := make_walls(5, 5)
     defer delete(walls.data)
 
-    f, err := make(walls)
-    assert(err == .None)
-    defer destroy(&f)
+    f := make(walls, context.temp_allocator)
 
-    for i in 0..<len(f.dirs.data) {
-        f.dirs.data[i] = {1, 0}
+    for i in 0..<len(f.field.data) {
+        f.field.data[i] = {1, 0}
     }
 
     dir := sample(&f, {2.5, 2.5})
@@ -97,18 +85,11 @@ broad_source_has_gradient_across_map :: proc(t: ^testing.T) {
     goal := [2]f32{100.5, 100.5}
     sigma := f32(200) / 2
 
-    s, err := conv.heat(walls, 0.5, 0.0005, sigma, 1)
-    assert(err == .None)
-    defer conv.destroy(&s)
-
-    src, src_err := conv.make_source(walls, conv.Goal{pos = goal, weight = 1}, sigma, 1)
-    assert(src_err == .None)
-    defer delete(src.data)
+    s := conv.heat(walls, 0.5, 0.0005, sigma, 1, context.temp_allocator)
+    src := conv.make_source(walls, conv.Goal{pos = goal, weight = 1}, sigma, 1, context.temp_allocator)
     conv.seed_source(&s, src)
 
-    f, flow_err := make(walls)
-    assert(flow_err == .None)
-    defer destroy(&f)
+    f := make(walls, context.temp_allocator)
     update(&f, &s)
 
     corners := [][2]f32{{0.5, 0.5}, {199.5, 0.5}, {0.5, 199.5}, {199.5, 199.5}}
