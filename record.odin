@@ -3,13 +3,14 @@ package main
 import "core:fmt"
 import "core:os"
 import rl "vendor:raylib"
+import sim "simulation"
 
 RECORD_SECONDS :: 10
-RECORD_WIDTH :: W * WINDOW_SCALE
-RECORD_HEIGHT :: H * WINDOW_SCALE
+RECORD_WIDTH   ::  sim.W * WINDOW_SCALE
+RECORD_HEIGHT  :: sim.H * WINDOW_SCALE
 
 Recorder :: struct {
-    outputs: [VISUALIZATION_COUNT]RecorderOutput,
+    outputs: [len(sim.Visualization)]RecorderOutput,
     active:  bool,
     frames:  int,
     target:  rl.RenderTexture2D,
@@ -18,15 +19,17 @@ Recorder :: struct {
 RecorderOutput :: struct {
     process:       os.Process,
     pipe:          ^os.File,
-    visualization: Visualization,
+    visualization: sim.Visualization,
 }
 
-visualization_name :: proc(v: Visualization) -> string {
+visualization_name :: proc(v: sim.Visualization) -> string {
     switch v {
     case .NONE:
         return "none"
     case .HEAT:
         return "heat"
+    case .FLOW:
+        return "flow"
     }
     return "unknown"
 }
@@ -45,7 +48,7 @@ record_start :: proc(rec: ^Recorder) -> bool {
     rec.frames = 0
     rec.active = true
     rl.SetTraceLogLevel(.WARNING)
-    for v in VISUALIZATIONS {
+    for v in sim.VISUALIZATIONS {
         if !record_start_output(rec, v) {
             record_stop(rec)
             return false
@@ -57,7 +60,7 @@ record_start :: proc(rec: ^Recorder) -> bool {
 }
 
 @(private)
-record_start_output :: proc(rec: ^Recorder, visualization: Visualization) -> bool {
+record_start_output :: proc(rec: ^Recorder, visualization: sim.Visualization) -> bool {
     r, w, pipe_err := os.pipe()
     if pipe_err != nil {
         fmt.eprintln("record: pipe failed:", pipe_err)
@@ -65,7 +68,7 @@ record_start_output :: proc(rec: ^Recorder, visualization: Visualization) -> boo
     }
 
     size := fmt.tprintf("%dx%d", RECORD_WIDTH, RECORD_HEIGHT)
-    fps := fmt.tprintf("%d", FPS)
+    fps := fmt.tprintf("%d", sim.FPS)
     path := fmt.tprintf("procimg_%s.mp4", visualization_name(visualization))
     command := []string{
         "ffmpeg",
@@ -125,18 +128,16 @@ record_stop :: proc(rec: ^Recorder) {
     }
 }
 
-// Every visualization is rendered from the same simulation frame, so all
-// outputs share an identical timeline.
-record_capture :: proc(rec: ^Recorder, sim: ^Simulation, camera: rl.Camera2D) {
+record_capture :: proc(rec: ^Recorder, s: ^sim.Simulation, camera: rl.Camera2D) {
     if !rec.active {
         return
     }
 
-    for v in VISUALIZATIONS {
+    for v in sim.VISUALIZATIONS {
         rl.BeginTextureMode(rec.target)
         rl.ClearBackground({0x18, 0x18, 0x18, 255})
-        simulation_draw(sim, v, camera)
-        rl.DrawText(rl.TextFormat("%s  %d/%d", visualization_name(v), rec.frames + 1, RECORD_SECONDS * FPS), 10, 10, 20, rl.WHITE)
+        sim.draw(s, v, camera)
+        rl.DrawText(rl.TextFormat("%s  %d/%d", visualization_name(v), rec.frames + 1, RECORD_SECONDS * sim.FPS), 10, 10, 20, rl.WHITE)
         rl.EndTextureMode()
 
         img := rl.LoadImageFromTexture(rec.target.texture)
@@ -149,13 +150,13 @@ record_capture :: proc(rec: ^Recorder, sim: ^Simulation, camera: rl.Camera2D) {
     }
 
     rec.frames += 1
-    if rec.frames >= RECORD_SECONDS * FPS {
+    if rec.frames >= RECORD_SECONDS * sim.FPS {
         record_stop(rec)
     }
 }
 
 @(private)
-record_write :: proc(rec: ^Recorder, visualization: Visualization, img: rl.Image) -> bool {
+record_write :: proc(rec: ^Recorder, visualization: sim.Visualization, img: rl.Image) -> bool {
     output := &rec.outputs[int(visualization)]
     if output.pipe == nil {
         return false

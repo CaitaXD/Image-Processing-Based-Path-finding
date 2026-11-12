@@ -58,8 +58,6 @@ step :: proc(s: ^HeatSolver, goals: []Goal, substeps: int) {
     }
 }
 
-// Builds the source term once so it can be added every step without recomputing
-// the Gaussian. Useful when a broad source is needed for navigation fields.
 make_source :: proc(walls: gd.Grid2D(u8), goal: Goal, sigma, strength: f32, allocator := context.allocator) -> (src: gd.Grid2D(f32), err: runtime.Allocator_Error) #optional_allocator_error {
     src = gd.make(f32, walls.width, walls.height, allocator) or_return
 

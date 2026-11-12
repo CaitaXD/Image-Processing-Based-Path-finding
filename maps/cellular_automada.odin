@@ -7,7 +7,7 @@ import "../grid"
 OBSTACLE :: u8(0)
 WALKABLE :: u8(1)
 
-cellular_automata :: proc(dims: [2]int, seed: int, obstacle_rate:f32=0.45, relaxation_steps := 5) -> (g: grid.Grid2D(u8), err: runtime.Allocator_Error) #optional_allocator_error {
+cellular_automata :: proc(dims: [2]int, seed: u64, obstacle_rate:f32=0.45, relaxation_steps := 5) -> (g: grid.Grid2D(u8), err: runtime.Allocator_Error) #optional_allocator_error {
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
     r := rand.create(u64(seed))
     gen := runtime.default_random_generator(&r)
