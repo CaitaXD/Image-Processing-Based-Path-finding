@@ -79,3 +79,34 @@ laplace :: proc() -> (k: Kernel, err: runtime.Allocator_Error) {
 
     return
 }
+
+// The heat operator as an explicit kernel array. The arm weight is fixed at rate / 4
+// rather than rate / deg(x), so the whole per-cell operator is a single 3x3 stencil:
+// walls and out-of-frame cells are simply read as 0 instead of being skipped, which
+// makes the boundary of the walkable region an open boundary that loses mass.
+//
+// OpenCV equivalent, once odin-opencv exports it (no FFI edits in this checkout):
+//   cv::filter2D(cv::Mat1f(u), cv::Mat1f(v), cv::Mat3f(K), cv::Border::CONSTANT)
+// grid.Grid2D(f32).data is row-major and contiguous, so u is a zero-copy Mat1f view.
+// The DFT symbol of this kernel is keep * ((1 - rate) + rate * (cos_x + cos_y) / 2)
+// where cos_x = cos(2 pi p / M) and cos_y = cos(2 pi q / N). It is a formula in the
+// frequency index, not an array: a t-step chain is one pointwise power of it and the
+// infinite chain is one divide, so no array of any radius is ever needed.
+diffusion :: proc(rate, decay: f32, allocator := context.allocator) -> (k: Kernel, err: runtime.Allocator_Error) #optional_allocator_error {
+    g := grid.make(f32, 3, 3, allocator) or_return
+    k = Kernel(g)
+
+    keep := 1.0 - clamp(decay, 0.0, 1.0)
+    mix := clamp(rate, 0.0, 1.0)
+    arm := keep * mix / 4.0
+    center := keep * (1.0 - mix)
+
+    values := [9]f32{
+        0.0, arm, 0.0,
+        arm, center, arm,
+        0.0, arm, 0.0,
+    }
+    copy(k.data, values[:])
+
+    return
+}

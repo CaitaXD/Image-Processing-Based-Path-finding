@@ -14,6 +14,7 @@ Recorder :: struct {
     active:  bool,
     frames:  int,
     target:  rl.RenderTexture2D,
+    encoder: string,
 }
 
 RecorderOutput :: struct {
@@ -34,9 +35,37 @@ visualization_name :: proc(v: sim.Visualization) -> string {
     return "unknown"
 }
 
+record_find_encoder :: proc() -> string {
+    candidates := []string{"libx264", "libopenh264", "mpeg4"}
+    for candidate in candidates {
+        cmd := []string{
+            "ffmpeg",
+            "-v", "error",
+            "-f", "lavfi",
+            "-i", "nullsrc",
+            "-c:v", candidate,
+            "-frames:v", "1",
+            "-f", "null",
+            "-",
+        }
+        desc := os.Process_Desc{
+            command = cmd,
+        }
+        state, _, _, err := os.process_exec(desc, context.temp_allocator)
+        if err == nil && state.success && state.exit_code == 0 {
+            return candidate
+        }
+    }
+    return "mpeg4"
+}
+
 record_start :: proc(rec: ^Recorder) -> bool {
     if rec.active {
         return true
+    }
+
+    if rec.encoder == "" {
+        rec.encoder = record_find_encoder()
     }
 
     rec.target = rl.LoadRenderTexture(RECORD_WIDTH, RECORD_HEIGHT)
@@ -55,7 +84,7 @@ record_start :: proc(rec: ^Recorder) -> bool {
         }
     }
 
-    fmt.println("recording all visualizations from the start")
+    fmt.println("recording all visualizations from the start (encoder:", rec.encoder, ")")
     return true
 }
 
@@ -70,7 +99,11 @@ record_start_output :: proc(rec: ^Recorder, visualization: sim.Visualization) ->
     size := fmt.tprintf("%dx%d", RECORD_WIDTH, RECORD_HEIGHT)
     fps := fmt.tprintf("%d", sim.FPS)
     path := fmt.tprintf("procimg_%s.mp4", visualization_name(visualization))
-    command := []string{
+
+    command: [dynamic]string
+    defer delete(command)
+
+    append(&command,
         "ffmpeg",
         "-y",
         "-loglevel", "error",
@@ -79,14 +112,18 @@ record_start_output :: proc(rec: ^Recorder, visualization: sim.Visualization) ->
         "-video_size", size,
         "-framerate", fps,
         "-i", "-",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
+        "-c:v", rec.encoder,
+    )
+    if rec.encoder == "libx264" {
+        append(&command, "-preset", "ultrafast")
+    }
+    append(&command,
         "-pix_fmt", "yuv420p",
         path,
-    }
+    )
 
     desc := os.Process_Desc {
-        command = command,
+        command = command[:],
         stdin   = r,
         stderr  = os.stderr,
     }
