@@ -73,30 +73,16 @@ make :: proc(dims: [2]int, generation: u64) -> Simulation {
 
 reset :: proc(s: ^Simulation) {
     seed := SEED + s.generation
-
     s.navmap = maps.cellular_automata(s.dims, seed)
-
-    // rate/decay build the per-cell operator. The source image the heat reads at frame 0 is
-    // built on reset below, since the solver only ever takes images (see heat/solver.odin).
-    s.heat = heat.solver(s.navmap, HEAT_RATE, HEAT_DECAY)
-
-    comb := spawn_comb(s.navmap, seed, UNIT_COUNT, SPAWN_FRACTION)
-
-    goal_pos := goal_cell(s.navmap, comb, seed, GOAL_SAMPLES)
+    s.heat   = heat.solver(s.navmap, HEAT_RATE, HEAT_DECAY)
+    s.units  = units_comb_filter(s.navmap, seed, UNIT_COUNT, SPAWN_FRACTION)
+    goal_pos := goal_cell(s.navmap, s.units, seed, GOAL_SAMPLES)
     s.goal = heat.splat_goal_disc(s.navmap, goal_pos, GOAL_RADIUS)
-    s.units = comb
-    units_next, err_units_next := cv.mat_new(f32, int(comb.rows), int(comb.cols))
+    units_next, err_units_next := cv.mat_new(f32, int(s.units.rows), int(s.units.cols))
     assert(err_units_next == .None)
     s.units_next = units_next
-
-    // The heat source is an image: the goal splatted at HEAT_SOURCE_RADIUS (half the map,
-    // so the wash covers the field and the flow field has a gradient everywhere at frame 0)
-    // through heat.splat_heat_source, then seeded with heat.seed_source. The image the step
-    // re-injects and the units sink into is the GOAL_RADIUS-wide one above, sampled from the
-    // same goal cell, so nothing downstream carries a goal position.
     wash := heat.splat_heat_source(s.navmap, goal_pos, HEAT_SOURCE_RADIUS, HEAT_SOURCE_STRENGTH)
     heat.seed_source(&s.heat, wash)
-
     s.flow = nav.make(s.navmap)
     pipeline_setup(s)
     pipeline_prebake(s)
@@ -113,8 +99,6 @@ regenerate :: proc(s: ^Simulation) {
     reset(s)
 }
 
-// Splitmix64 over (SEED + generation): the layout is a pure function of the seed, so a
-// recorded run replays exactly and R only moves the generation counter.
 next_u64 :: proc(state: ^u64) -> u64 {
     state^ += 0x9E3779B97F4A7C15
     a := state^
@@ -128,12 +112,7 @@ pick :: proc(state: ^u64, n: int) -> int {
     return int(next_u64(state) % cast(u64)(n))
 }
 
-// Units stay an image, like everything that moves on the map: a Dirac comb, 1 at one
-// walkable cell per unit inside the spawn band on the left of the map, 0 elsewhere.
-// step advects that very image through the flow field (advect_units), so its support
-// is where the units are this frame and its total is the unit count every frame -
-// conservation reads as "no unit was ever lost".
-spawn_comb :: proc(navmap: cv.Mat(f32), seed: u64, count: int, spawn_fraction: f32) -> cv.Mat(f32) {
+units_comb_filter :: proc(navmap: cv.Mat(f32), seed: u64, count: int, spawn_fraction: f32) -> cv.Mat(f32) {
     comb, err := cv.mat_new(f32, int(navmap.rows), int(navmap.cols))
     assert(err == .None)
 
@@ -154,14 +133,9 @@ spawn_comb :: proc(navmap: cv.Mat(f32), seed: u64, count: int, spawn_fraction: f
         placed += 1
     }
     assert(placed > 0, "spawn_comb: the spawn band must hold at least one walkable cell")
-
     return comb
 }
 
-// Geodesic 4-connected distance from the comb, -1 at walls and at cells the units cannot
-// reach. That connectivity is the one the heat stencil, nav.update, walkable_cell and the
-// advection corner guard share, so a goal outside the reachable set is one the units
-// could never advect to: the goal splat would stay empty for the whole run.
 goal_cell :: proc(navmap: cv.Mat(f32), units: cv.Mat(f32), seed: u64, samples: int) -> [2]int {
     w := int(navmap.cols)
     h := int(navmap.rows)
@@ -172,7 +146,6 @@ goal_cell :: proc(navmap: cv.Mat(f32), units: cv.Mat(f32), seed: u64, samples: i
         dist.data[i] = -1
     }
 
-    // Each cell is pushed once, so the flat queue never needs more room than the image.
     queue, err_queue := cv.mat_new(i32, h, w, context.temp_allocator)
     assert(err_queue == .None)
 
@@ -216,8 +189,6 @@ goal_cell :: proc(navmap: cv.Mat(f32), units: cv.Mat(f32), seed: u64, samples: i
         }
     }
 
-    // Farthest-point sample: the random candidates only decide which equally far cell
-    // wins, so the goal is always as far from the spawns as a sampled cell can get.
     state := seed
     best_x := 0
     best_y := 0
@@ -243,8 +214,6 @@ goal_cell :: proc(navmap: cv.Mat(f32), units: cv.Mat(f32), seed: u64, samples: i
 }
 
 step :: proc(s: ^Simulation, dt: f32) {
-    // One frame of Experiment 1: OpenCV masks, heat diffusion, Sobel vector
-    // field, wall masking and cv2.remap of the unit image (see pipeline.odin).
     pipeline_step(s)
 }
 
@@ -252,14 +221,6 @@ update_heat :: proc(s: ^Simulation) {
     heat.update_texture(s.heat_tex, &s.heat_img, &s.heat)
 }
 
-// Grid advection of the units, one hop per frame on the very grid the flow field lives
-// on: each unit moves to the neighbour cell the flow vector at its own cell points at
-// best, walls only close a cell so a unit never waits for an open downstream - it takes
-// the best aligned open neighbour or holds if none aligns, a diagonal never squeezes
-// past wall corners (the same guard the old mover's cuts_corner kept), and a unit
-// standing on the goal splat has arrived and stays put. Mass is only ever moved, never
-// created nor damped, so the comb's total stays the unit count every frame and its
-// support is where the units are this frame.
 draw :: proc(s: ^Simulation, visualization: Visualization, camera: rl.Camera2D) {
     rl.BeginMode2D(camera)
     rl.DrawTextureEx(s.map_tex, {0, 0}, 0, 1, rl.WHITE)
@@ -278,9 +239,6 @@ draw :: proc(s: ^Simulation, visualization: Visualization, camera: rl.Camera2D) 
     rl.EndMode2D()
 }
 
-// Markers are the splat read backwards: an image's support rasterized back into screen
-// squares, so the display needs no sampling coordinates either and every view shows the
-// same units and goal the operators act on.
 draw_markers :: proc(img: cv.Mat(f32), size: f32, color: rl.Color) {
     for y in 0..<int(img.rows) {
         for x in 0..<int(img.cols) {

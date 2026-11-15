@@ -26,7 +26,7 @@ pipeline_headless_fill :: proc(s: ^Simulation, seed: u64) {
 	s.navmap = maps.cellular_automata(s.dims, seed)
 	s.heat = heat.solver(s.navmap, HEAT_RATE, HEAT_DECAY)
 
-	comb := spawn_comb(s.navmap, seed, UNIT_COUNT, SPAWN_FRACTION)
+	comb := units_comb_filter(s.navmap, seed, UNIT_COUNT, SPAWN_FRACTION)
 	goal_pos := goal_cell(s.navmap, comb, seed, GOAL_SAMPLES)
 	s.goal = heat.splat_goal_disc(s.navmap, goal_pos, GOAL_RADIUS)
 	s.units = comb
