@@ -1,13 +1,12 @@
 package heat
 
 import rl "vendor:raylib"
-import "../conv"
-import "../grid"
 import "../maps"
+import cv "../odin-opencv"
 
-update_texture :: proc(tex: rl.Texture2D, img: ^rl.Image, s: ^conv.HeatSolver) {
+update_texture :: proc(tex: rl.Texture2D, img: ^rl.Image, s: ^HeatSolver) {
     max_u: f32
-    for value in s.field.data {
+    for value in cv.pixels(s.field) {
         if value > max_u {
             max_u = value
         }
@@ -15,13 +14,15 @@ update_texture :: proc(tex: rl.Texture2D, img: ^rl.Image, s: ^conv.HeatSolver) {
     inv_max := 1 / max(max_u, f32(1e-6))
 
     pixels := cast([^]rl.Color)img.data
-    for y in 0..<s.field.height {
-        for x in 0..<s.field.width {
-            index := x + y * s.field.width
-            if grid.at(s.grid, x, y)^ != maps.WALKABLE {
+    width := int(s.field.cols)
+    height := int(s.field.rows)
+    for y in 0..<height {
+        for x in 0..<width {
+            index := x + y * width
+            if cv.at(&s.navmap, x, y)^ == maps.OBSTACLE {
                 pixels[index] = {0, 0, 0, 0}
             } else {
-                pixels[index] = heat_color(grid.at(s.field, x, y)^ * inv_max)
+                pixels[index] = heat_color(cv.at(&s.field, x, y)^ * inv_max)
             }
         }
     }
@@ -55,5 +56,3 @@ heat_color :: proc(t: f32) -> rl.Color {
         255,
     }
 }
-
-

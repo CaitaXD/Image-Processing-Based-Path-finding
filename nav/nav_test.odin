@@ -1,16 +1,17 @@
 package nav
 
+import "base:runtime"
 import "core:math"
 import "core:testing"
-import "../conv"
-import "../grid"
+import "../heat"
 import "../maps"
+import cv "../odin-opencv"
 
 @(private)
-make_walls :: proc(w, h: int) -> grid.Grid2D(u8) {
-    g, err := grid.make(u8, w, h)
+make_walls :: proc(w, h: int) -> cv.Mat(f32) {
+    g, err := cv.mat_new(f32, h, w, context.temp_allocator)
     assert(err == .None)
-    for i in 0..<len(g.data) {
+    for i in 0..<w * h {
         g.data[i] = maps.WALKABLE
     }
     return g
@@ -18,83 +19,73 @@ make_walls :: proc(w, h: int) -> grid.Grid2D(u8) {
 
 @(test)
 gradient_points_uphill :: proc(t: ^testing.T) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
     walls := make_walls(9, 9)
-    defer delete(walls.data)
 
-    s := conv.heat(walls, 0.5, 0.0005, 1, 1, context.temp_allocator)
+    s := heat.solver(walls, 0.5, 0.0005, context.temp_allocator)
 
-    for y in 0..<walls.height {
-        for x in 0..<walls.width {
-            grid.at(s.field, x, y)^ = f32(x*x + y*y)
+    for y in 0..<int(walls.rows) {
+        for x in 0..<int(walls.cols) {
+            cv.at(&s.field, x, y)^ = f32(x*x + y*y)
         }
     }
 
     f := make(walls, context.temp_allocator)
     update(&f, &s)
 
-    dir := sample(&f, {4.5, 4.5})
+    dir := cv.at(&f.field, 4, 4)^
     assert(dir[0] > 0.5 && dir[1] > 0.5, "gradient must point toward increasing heat")
 }
 
 @(test)
 walls_do_not_create_normal_gradient :: proc(t: ^testing.T) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
     walls := make_walls(9, 9)
-    defer delete(walls.data)
 
-    grid.at(walls, 5, 4)^ = maps.OBSTACLE
+    cv.at(&walls, 5, 4)^ = maps.OBSTACLE
 
-    s := conv.heat(walls, 0.5, 0.0005, 1, 1, context.temp_allocator)
+    s := heat.solver(walls, 0.5, 0.0005, context.temp_allocator)
 
-    for y in 0..<walls.height {
-        for x in 0..<walls.width {
-            grid.at(s.field, x, y)^ = f32(y)
+    for y in 0..<int(walls.rows) {
+        for x in 0..<int(walls.cols) {
+            cv.at(&s.field, x, y)^ = f32(y)
         }
     }
 
     f := make(walls, context.temp_allocator)
     update(&f, &s)
 
-    dir := sample(&f, {4.5, 4.5})
+    dir := cv.at(&f.field, 4, 4)^
     assert(dir[0] == 0, "gradient must not point into a wall")
     assert(dir[1] > 0.5, "gradient must still follow the wall")
 
-    wall_dir := sample(&f, {5.5, 4.5})
+    wall_dir := cv.at(&f.field, 5, 4)^
     assert(wall_dir[0] == 0 && wall_dir[1] == 0, "wall cells have no direction")
 }
 
 @(test)
-sample_interpolates_directions :: proc(t: ^testing.T) {
-    walls := make_walls(5, 5)
-    defer delete(walls.data)
-
-    f := make(walls, context.temp_allocator)
-
-    for i in 0..<len(f.field.data) {
-        f.field.data[i] = {1, 0}
-    }
-
-    dir := sample(&f, {2.5, 2.5})
-    assert(abs(dir[0] - 1) < 1e-6 && abs(dir[1]) < 1e-6, "sample must return the local direction")
-}
-
-@(test)
 broad_source_has_gradient_across_map :: proc(t: ^testing.T) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
     walls := make_walls(200, 200)
-    defer delete(walls.data)
 
     goal := [2]f32{100.5, 100.5}
+    goal_cell := [2]int{100, 100}
     sigma := f32(200) / 2
 
-    s := conv.heat(walls, 0.5, 0.0005, sigma, 1, context.temp_allocator)
-    src := conv.make_source(walls, conv.Goal{pos = goal, weight = 1}, sigma, 1, context.temp_allocator)
-    conv.seed_source(&s, src)
+    s := heat.solver(walls, 0.5, 0.0005, context.temp_allocator)
+    src, err_src := heat.splat_heat_source(walls, goal_cell, sigma, 1, context.temp_allocator)
+    assert(err_src == .None)
+    heat.seed_source(&s, src)
 
     f := make(walls, context.temp_allocator)
     update(&f, &s)
 
     corners := [][2]f32{{0.5, 0.5}, {199.5, 0.5}, {0.5, 199.5}, {199.5, 199.5}}
     for pos in corners {
-        dir := sample(&f, pos)
+        dir := cv.at(&f.field, int(pos[0]), int(pos[1]))^
         to_goal := goal - pos
         length := math.sqrt(to_goal[0]*to_goal[0] + to_goal[1]*to_goal[1])
         dot := dir[0]*to_goal[0]/length + dir[1]*to_goal[1]/length

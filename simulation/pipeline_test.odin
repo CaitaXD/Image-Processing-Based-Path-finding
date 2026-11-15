@@ -1,10 +1,10 @@
 package simulation
 
+import "base:runtime"
 import "core:math"
 import "core:testing"
 import "core:fmt"
-import "../conv"
-import "../grid"
+import "../heat"
 import "../maps"
 import "../nav"
 import cv "../odin-opencv"
@@ -12,37 +12,30 @@ import cv "../odin-opencv"
 // Headless construction of the pipeline's images: no raylib textures, but the
 // same navmap/heat/goal/units the application builds in make()/reset().
 @(private)
-pipeline_headless :: proc(seed: u64) -> Simulation {
-	s: Simulation
+pipeline_headless :: proc(seed: u64) -> (s: Simulation) {
 	pipeline_headless_fill(&s, seed)
-	return s
+	return
 }
 
 @(private)
 pipeline_headless_fill :: proc(s: ^Simulation, seed: u64) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
 	s.dims = {W, H}
 	s.generation = 0
 	s.navmap = maps.cellular_automata(s.dims, seed)
-	s.heat = conv.heat(
-		s.navmap,
-		HEAT_RATE,
-		HEAT_DECAY,
-		HEAT_SOURCE_RADIUS,
-		HEAT_SOURCE_STRENGTH,
-	)
+	s.heat = heat.solver(s.navmap, HEAT_RATE, HEAT_DECAY)
 
 	comb := spawn_comb(s.navmap, seed, UNIT_COUNT, SPAWN_FRACTION)
-	goal := conv.Goal {
-		pos    = goal_cell(s.navmap, comb, seed, GOAL_SAMPLES),
-		weight = 1,
-	}
-	s.goal = conv.goal_image(s.navmap, goal, GOAL_RADIUS)
+	goal_pos := goal_cell(s.navmap, comb, seed, GOAL_SAMPLES)
+	s.goal = heat.splat_goal_disc(s.navmap, goal_pos, GOAL_RADIUS)
 	s.units = comb
-	next, err_next := grid.make(f32, s.navmap.width, s.navmap.height)
+	next, err_next := cv.mat_new(f32, int(s.navmap.rows), int(s.navmap.cols), context.temp_allocator)
 	assert(err_next == .None)
 	s.units_next = next
 
-	conv.seed_goal(&s.heat, goal)
+	wash := heat.splat_heat_source(s.navmap, goal_pos, HEAT_SOURCE_RADIUS, HEAT_SOURCE_STRENGTH, context.temp_allocator)
+	heat.seed_source(&s.heat, wash)
 
 	s.flow = nav.make(s.navmap)
 	pipeline_setup(s)
@@ -51,9 +44,9 @@ pipeline_headless_fill :: proc(s: ^Simulation, seed: u64) {
 }
 
 @(private)
-unit_mass :: proc(units: grid.Grid2D(f32)) -> f32 {
+unit_mass :: proc(units: cv.Mat(f32)) -> f32 {
 	total := f32(0)
-	for value in units.data {
+	for value in cv.pixels(units) {
 		total += value
 	}
 	return total
@@ -61,12 +54,12 @@ unit_mass :: proc(units: grid.Grid2D(f32)) -> f32 {
 
 // unit_centroid returns where the comb is and how much mass it carries.
 @(private)
-unit_centroid :: proc(units: grid.Grid2D(f32)) -> ([2]f32, f32) {
+unit_centroid :: proc(units: cv.Mat(f32)) -> ([2]f32, f32) {
 	total := f32(0)
 	sum := [2]f32{0, 0}
-	for y in 0..<units.height {
-		for x in 0..<units.width {
-			mass := units.data[x + y * units.width]
+	for y in 0..<int(units.rows) {
+		for x in 0..<int(units.cols) {
+			mass := units.data[x + y * int(units.cols)]
 			if mass <= 0 {
 				continue
 			}
@@ -82,9 +75,9 @@ unit_centroid :: proc(units: grid.Grid2D(f32)) -> ([2]f32, f32) {
 }
 
 @(private)
-unit_support :: proc(units: grid.Grid2D(f32)) -> int {
+unit_support :: proc(units: cv.Mat(f32)) -> int {
 	n := 0
-	for value in units.data {
+	for value in cv.pixels(units) {
 		if value > 0 do n += 1
 	}
 	return n
@@ -92,9 +85,9 @@ unit_support :: proc(units: grid.Grid2D(f32)) -> int {
 
 // goal_mass is the amount of unit mass sitting on the goal splat.
 @(private)
-unit_goal_mass :: proc(units, goal: grid.Grid2D(f32)) -> f32 {
+unit_goal_mass :: proc(units, goal: cv.Mat(f32)) -> f32 {
 	total := f32(0)
-	for i in 0..<len(units.data) {
+	for i in 0..<int(units.rows * units.cols) {
 		if goal.data[i] > 0 do total += units.data[i]
 	}
 	return total
@@ -103,12 +96,12 @@ unit_goal_mass :: proc(units, goal: grid.Grid2D(f32)) -> f32 {
 // goal_centroid is the centre of the goal splat (the destination the comb
 // should travel toward).
 @(private)
-goal_centroid :: proc(goal: grid.Grid2D(f32)) -> ([2]f32, int) {
+goal_centroid :: proc(goal: cv.Mat(f32)) -> ([2]f32, int) {
 	sum := [2]f32{0, 0}
 	n := 0
-	for y in 0..<goal.height {
-		for x in 0..<goal.width {
-			if goal.data[x + y * goal.width] > 0 {
+	for y in 0..<int(goal.rows) {
+		for x in 0..<int(goal.cols) {
+			if goal.data[x + y * int(goal.cols)] > 0 {
 				sum[0] += f32(x)
 				sum[1] += f32(y)
 				n += 1
@@ -128,50 +121,10 @@ distance :: proc(a, b: [2]f32) -> f32 {
 	return math.sqrt(dx * dx + dy * dy)
 }
 
-// The OpenCV heat step (filter2D + divide by coverage + wall mask + source) must
-// reproduce the native conv step exactly; this is the check that the wrapper and
-// the kernel/coverage images are wired correctly.
-@(test)
-pipeline_heat_matches_the_native_step :: proc(t: ^testing.T) {
-	s: Simulation
-	s.dims = {W, H}
-	s.navmap = maps.cellular_automata(s.dims, SEED)
-	s.heat = conv.heat(s.navmap, HEAT_RATE, HEAT_DECAY, HEAT_SOURCE_RADIUS, HEAT_SOURCE_STRENGTH)
-	comb := spawn_comb(s.navmap, SEED, UNIT_COUNT, SPAWN_FRACTION)
-	goal := conv.Goal {
-		pos    = goal_cell(s.navmap, comb, SEED, GOAL_SAMPLES),
-		weight = 1,
-	}
-	s.goal = conv.goal_image(s.navmap, goal, GOAL_RADIUS)
-	s.units = comb
-	next, err_next := grid.make(f32, W, H)
-	assert(err_next == .None)
-	s.units_next = next
-	conv.seed_goal(&s.heat, goal)
-	s.flow = nav.make(s.navmap)
-	pipeline_setup(&s)
-
-	pipeline_masks(&s)
-	pipeline_heat(&s)
-
-	native, err_native := grid.make(f32, W, H)
-	assert(err_native == .None)
-	copy(native.data, s.heat.field.data)
-
-	conv.seed_goal(&s.heat, goal)
-	conv.step_with_source(&s.heat, s.goal, HEAT_SUBSTEPS)
-
-	diff := f32(0)
-	for i in 0..<len(native.data) {
-		d := math.abs(native.data[i] - s.heat.field.data[i])
-		if d > diff do diff = d
-	}
-	fmt.printf("heat step: max difference pipeline vs native {:.3e}\n", diff)
-	testing.expect(t, diff < 1e-4, "the OpenCV heat step must match the native step")
-}
-
 @(test)
 pipeline_keeps_the_images_alive :: proc(t: ^testing.T) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
 	s: Simulation
 	pipeline_headless_fill(&s, SEED)
 
@@ -183,7 +136,7 @@ pipeline_keeps_the_images_alive :: proc(t: ^testing.T) {
 	finite := true
 	walkable := 0
 	flow_nonzero := 0
-	for i in 0..<len(s.heat.field.data) {
+	for i in 0..<int(s.heat.field.rows * s.heat.field.cols) {
 		value := s.heat.field.data[i]
 		if value != value || value > 3.0e38 || value < -3.0e38 {
 			finite = false
@@ -218,6 +171,8 @@ pipeline_keeps_the_images_alive :: proc(t: ^testing.T) {
 // masses (one cell each) without losing mass.
 @(test)
 pipeline_units_travel_toward_the_goal :: proc(t: ^testing.T) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
 	s: Simulation
 	pipeline_headless_fill(&s, SEED)
 
@@ -271,12 +226,14 @@ pipeline_units_travel_toward_the_goal :: proc(t: ^testing.T) {
 // the comb happens to start.
 @(test)
 pipeline_flow_basin :: proc(t: ^testing.T) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
 	s: Simulation
 	pipeline_headless_fill(&s, SEED)
 	pipeline_step(&s)
 
-	w := s.navmap.width
-	h := s.navmap.height
+	w := int(s.navmap.cols)
+	h := int(s.navmap.rows)
 	arrived := 0
 	started := 0
 	for y in 1..<h - 1 {
@@ -322,13 +279,17 @@ pipeline_flow_basin :: proc(t: ^testing.T) {
 
 @(test)
 pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+    context.allocator = context.temp_allocator
 	size := 7
-	units, err_units := grid.make(f32, size, size)
-	scratch, err_scratch := grid.make(f32, size, size)
-	navmap, err_map := grid.make(u8, size, size)
-	flow_grid, err_flow := grid.make([2]f32, size, size)
-	map_x := cv.new_mat(f32, size, size)
-	map_y := cv.new_mat(f32, size, size)
+	units, err_units := cv.mat_new(f32, size, size, context.temp_allocator)
+	scratch, err_scratch := cv.mat_new(f32, size, size, context.temp_allocator)
+	navmap, err_map := cv.mat_new(f32, size, size, context.temp_allocator)
+// resample_units reads only the navmap and the field, so the flow field is
+// assembled here rather than through nav.make, whose gradient scratch this test never runs.
+	flow_grid, err_flow := cv.mat_new([2]f32, size, size, context.temp_allocator)
+	map_x := cv.mat_new(f32, size, size, context.temp_allocator)
+	map_y := cv.mat_new(f32, size, size, context.temp_allocator)
 	assert(
 		err_units == .None &&
 		err_scratch == .None &&
@@ -336,7 +297,7 @@ pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
 		err_flow == .None,
 	)
 
-	for i in 0..<len(navmap.data) {
+	for i in 0..<int(navmap.rows * navmap.cols) {
 		navmap.data[i] = maps.WALKABLE
 		flow_grid.data[i] = {1, 0}
 	}
@@ -345,10 +306,10 @@ pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
 		field  = flow_grid,
 	}
 
-	units.data[3 + 3 * size] = 1
+	cv.at(&units, 3, 3)^ = 1
 	resample_units(&units, &scratch, navmap, &flow, &map_x, &map_y)
 
-	testing.expect(t, units.data[4 + 3 * size] == 1, "the unit must move one cell along the flow")
-	testing.expect(t, units.data[3 + 3 * size] == 0, "the unit must leave its old cell empty")
+	testing.expect(t, cv.at(&units, 4, 3)^ == 1, "the unit must move one cell along the flow")
+	testing.expect(t, cv.at(&units, 3, 3)^ == 0, "the unit must leave its old cell empty")
 	testing.expect(t, unit_mass(units) == 1, "the moved unit must keep its mass")
 }

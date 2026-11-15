@@ -1,126 +1,125 @@
 package nav
 
 import "base:runtime"
-import "core:math"
-import "../conv"
-import "../grid"
+import "../heat"
 import "../maps"
+import cv "../odin-opencv"
 
 FlowField :: struct {
-    navmap: grid.Grid2D(u8),
-    field:  grid.Grid2D([2]f32),
+    navmap:    cv.Mat(f32),
+    field:     cv.Mat([2]f32),
+    padded:    cv.Mat(f32),
+    avg:       cv.Mat(f32),
+    gx:        cv.Mat(f32),
+    gy:        cv.Mat(f32),
+    wall_cov:  cv.Mat(f32),
+    wall_mask: cv.Mat(u8),
+    mag:       cv.Mat(f32),
+    zero:      cv.Mat(f32),
+    unit:      cv.Mat([2]f32),
+    map_x:     cv.Mat(f32),
+    map_y:     cv.Mat(f32),
+    cross:     cv.Mat(f32),
 }
 
-make :: proc(walls: grid.Grid2D(u8), allocator := context.allocator) -> (f: FlowField, err: runtime.Allocator_Error) #optional_allocator_error {
+make :: proc(walls: cv.Mat(f32), allocator := context.allocator) -> (f: FlowField, err: runtime.Allocator_Error) #optional_allocator_error {
     f.navmap = walls
-    f.field = grid.make([2]f32, walls.width, walls.height, allocator) or_return
+
+    w := int(walls.cols)
+    h := int(walls.rows)
+
+    f.field  = cv.mat_new([2]f32, h, w, allocator) or_return
+
+    // OpenCV's Sobel does not compute its own outermost
+    // pixel row and column, so a unit standing on the
+    // edge of the map would have no direction to follow. 
+    f.padded    = cv.mat_new(f32, h + 2, w + 2, allocator)      or_return
+    f.avg       = cv.mat_new(f32, h + 2, w + 2, allocator)      or_return
+    f.gx        = cv.mat_new(f32, h + 2, w + 2, allocator)      or_return
+    f.gy        = cv.mat_new(f32, h + 2, w + 2, allocator)      or_return
+    f.wall_cov  = cv.mat_new(f32, h + 2, w + 2, allocator)      or_return
+    f.wall_mask = cv.mat_new(u8,  h + 2, w + 2, allocator)      or_return
+    f.mag       = cv.mat_new(f32, h + 2, w + 2, allocator)      or_return
+    f.zero      = cv.mat_new(f32, h + 2, w + 2, allocator)      or_return
+    f.unit      = cv.mat_new([2]f32, h + 2, w + 2, allocator)   or_return
+    f.map_x     = cv.mat_new(f32, h, w, allocator)              or_return
+    f.map_y     = cv.mat_new(f32, h, w, allocator)              or_return
+
+    values := [9]f32 {
+        0.00, 0.25, 0.00,
+        0.25, 0.00, 0.25,
+        0.00, 0.25, 0.00,
+    }
+
+    f.cross = cv.mat_new(f32, 3, 3, allocator) or_return
+    copy(f.cross.data[:9], values[:])
+
+    prepare(&f)
     return
 }
 
-// The flow is the gradient of the potential: central differences over the four walkable taps,
-// normalised to a unit vector. The gate is relative rather than absolute because the potential's
-// scale is set by whatever the seeding leaves behind: with the goal splatted at half the map the
-// seeded field's minimum over the 112,627 walkable cells of seed 42 is 5.6e-01, so an absolute
-// threshold is never reached and both gates read the same - measured with the absolute 1e-12
-// form, flow is still non-zero on all 112,627 walkable cells and 0 of 100 units have a zero
-// vector. The relative form stays because it is scale-free: a seeding that does wash the field
-// leaves a floor of 1e-15 in a 1-wide corridor at decay 2e-6, and against the brightest tap
-// such a cell is a slope of 0.1, a direction like any other.
-update :: proc(f: ^FlowField, s: ^conv.HeatSolver) {
-    assert(s.field.width == f.navmap.width && s.field.height == f.navmap.height)
-
-    for y in 0..<f.navmap.height {
-        for x in 0..<f.navmap.width {
-            if grid.at(f.navmap, x, y)^ != maps.WALKABLE {
-                grid.at(f.field, x, y)^ = {}
-                continue
-            }
-
-            value := grid.at(s.field, x, y)^
-            left, right, up, down := value, value, value, value
-
-            if x > 0 && grid.at(f.navmap, x-1, y)^ == maps.WALKABLE {
-                left = grid.at(s.field, x-1, y)^
-            }
-            if x+1 < f.navmap.width && grid.at(f.navmap, x+1, y)^ == maps.WALKABLE {
-                right = grid.at(s.field, x+1, y)^
-            }
-            if y > 0 && grid.at(f.navmap, x, y-1)^ == maps.WALKABLE {
-                up = grid.at(s.field, x, y-1)^
-            }
-            if y+1 < f.navmap.height && grid.at(f.navmap, x, y+1)^ == maps.WALKABLE {
-                down = grid.at(s.field, x, y+1)^
-            }
-
-            brightest := value
-            if left > brightest {
-                brightest = left
-            }
-            if right > brightest {
-                brightest = right
-            }
-            if up > brightest {
-                brightest = up
-            }
-            if down > brightest {
-                brightest = down
-            }
-
-            gx := right - left
-            gy := down - up
-            length := math.sqrt(gx*gx + gy*gy)
-
-            if length > f32(1e-6) * brightest {
-                grid.at(f.field, x, y)^ = {gx / length, gy / length}
-            } else {
-                grid.at(f.field, x, y)^ = {}
-            }
-        }
-    }
-}
-
-sample :: proc(f: ^FlowField, pos: [2]f32) -> [2]f32 {
-    cx := int(math.floor(pos[0]))
-    cy := int(math.floor(pos[1]))
-    if !walkable_cell(f.navmap, cx, cy) {
-        return {}
-    }
-
-    gx := pos[0] - 0.5
-    gy := pos[1] - 0.5
-    x0 := int(math.floor(gx))
-    y0 := int(math.floor(gy))
-    x1 := x0 + 1
-    y1 := y0 + 1
-
-    if walkable_cell(f.navmap, x0, y0) &&
-       walkable_cell(f.navmap, x1, y0) &&
-       walkable_cell(f.navmap, x0, y1) &&
-       walkable_cell(f.navmap, x1, y1) {
-        fx := gx - f32(x0)
-        fy := gy - f32(y0)
-
-        d00 := grid.at(f.field, x0, y0)^
-        d10 := grid.at(f.field, x1, y0)^
-        d01 := grid.at(f.field, x0, y1)^
-        d11 := grid.at(f.field, x1, y1)^
-
-        dx := (d00[0]*(1-fx) + d10[0]*fx)*(1-fy) + (d01[0]*(1-fx) + d11[0]*fx)*fy
-        dy := (d00[1]*(1-fx) + d10[1]*fx)*(1-fy) + (d01[1]*(1-fx) + d11[1]*fx)*fy
-
-        length := math.sqrt(dx*dx + dy*dy)
-        if length > 1e-12 {
-            return {dx / length, dy / length}
-        }
-    }
-
-    return grid.at(f.field, cx, cy)^
+update :: proc(f: ^FlowField, s: ^heat.HeatSolver) {
+    assert(s.field.cols == f.navmap.cols && s.field.rows == f.navmap.rows)
+    cv.copy_make_border(&s.field, &f.padded, 1, 1, 1, 1, cv.BorderType.REPLICATE)
+    cv.filter_2d(&f.padded, &f.avg, &f.cross)
+    cv.div(&f.avg, &f.wall_cov, &f.avg)
+    cv.copy_to(&f.avg, &f.padded, &f.wall_mask)
+    cv.gradient_x(&f.padded, &f.gx)
+    cv.gradient_y(&f.padded, &f.gy)
+    cv.set_to(&f.gx, 0, &f.wall_mask)
+    cv.set_to(&f.gy, 0, &f.wall_mask)
+    cv.magnitude(&f.gx, &f.gy, &f.mag)
+    cv.threshold(&f.mag, &f.zero, 0, 1, .BINARY_INV)
+    cv.max(&f.mag, &f.zero, &f.mag)
+    cv.div(&f.gx, &f.mag, &f.gx)
+    cv.div(&f.gy, &f.mag, &f.gy)
+    cv.merge(&f.gx, &f.gy, &f.unit)
+    cv.resample(&f.unit, &f.field, &f.map_x, &f.map_y, .NEAREST)
 }
 
 @(private)
-walkable_cell :: proc(walls: grid.Grid2D(u8), x, y: int) -> bool {
-    if x < 0 || y < 0 || x >= walls.width || y >= walls.height {
-        return false
+prepare :: proc(f: ^FlowField) {
+    w := int(f.navmap.cols)
+    h := int(f.navmap.rows)
+    pw := w + 2
+
+    for y in 0..<h + 2 {
+        for x in 0..<w + 2 {
+            i := x + y * pw
+            if x >= 1 && x <= w && y >= 1 && y <= h {
+                f.wall_mask.data[i] = 1 if f.navmap.data[x - 1 + (y - 1) * w] != maps.WALKABLE else 0
+            } else {
+                f.wall_mask.data[i] = 0
+            }
+        }
     }
-    return grid.at(walls, x, y)^ == maps.WALKABLE
+
+    for y in 0..<h + 2 {
+        for x in 0..<w + 2 {
+            i := x + y * pw
+            weight := f32(0)
+            if x > 0 && f.wall_mask.data[i - 1] == 0 {
+                weight += 0.25
+            }
+            if x + 1 < w + 2 && f.wall_mask.data[i + 1] == 0 {
+                weight += 0.25
+            }
+            if y > 0 && f.wall_mask.data[i - pw] == 0 {
+                weight += 0.25
+            }
+            if y + 1 < h + 2 && f.wall_mask.data[i + pw] == 0 {
+                weight += 0.25
+            }
+            f.wall_cov.data[i] = max(weight, f32(1e-6))
+        }
+    }
+
+    for y in 0..<h {
+        for x in 0..<w {
+            i := x + y * w
+            f.map_x.data[i] = f32(x + 1)
+            f.map_y.data[i] = f32(y + 1)
+        }
+    }
 }
+
