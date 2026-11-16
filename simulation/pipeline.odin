@@ -20,6 +20,14 @@ Pipeline :: struct {
 
 	map_x:    cv.Mat(f32),
 	map_y:    cv.Mat(f32),
+
+	origin_x: cv.Mat(f32),
+	origin_y: cv.Mat(f32),
+
+	dir_x: cv.Mat(f32),
+	dir_y: cv.Mat(f32),
+
+	half: cv.Mat(f32),
 }
 
 pipeline_setup :: proc(s: ^Simulation) {
@@ -40,6 +48,13 @@ pipeline_setup :: proc(s: ^Simulation) {
 
 	p.map_x = cv.mat_new(f32, h, w)
 	p.map_y = cv.mat_new(f32, h, w)
+	p.origin_x = cv.mat_new(f32, h, w)
+	p.origin_y = cv.mat_new(f32, h, w)
+	cv.identity_maps(&p.origin_x, &p.origin_y)
+	p.dir_x = cv.mat_new(f32, h, w)
+	p.dir_y = cv.mat_new(f32, h, w)
+	p.half = cv.mat_new(f32, h, w)
+	cv.fill(&p.half, 0.5)
 
 	p.units = s.units
 	p.scratch = s.units_next
@@ -87,133 +102,28 @@ pipeline_flow :: proc(s: ^Simulation) {
 resample_units :: proc(
 	units: ^cv.Mat(f32),
 	scratch: ^cv.Mat(f32),
-	navmap: cv.Mat(f32),
 	flow: ^nav.FlowField,
 	map_x, map_y: ^cv.Mat(f32),
+	half: ^cv.Mat(f32),
+	dir_x, dir_y: ^cv.Mat(f32),
+	origin_x, origin_y: ^cv.Mat(f32),
 ) {
-	w := int(navmap.cols)
-	h := int(navmap.rows)
-
-	trash := 0
-	for i in 0..<w * h {
-		if navmap.data[i] != maps.WALKABLE {
-			trash = i
-			break
-		}
-	}
-	for i in 0..<int(map_x.rows * map_x.cols) {
-		map_x.data[i] = -1
-		map_y.data[i] = 0
-	}
-
-	for i in 0..<w * h {
-		if units.data[i] > 0 && navmap.data[i] == maps.WALKABLE {
-			map_x.data[i] = f32(i % w)
-			map_y.data[i] = f32(i / w)
-		}
-	}
-
-	for _ in 0..<8 {
-		moved := 0
-		for y in 0..<h {
-			for x in 0..<w {
-				i := x + y * w
-				if units.data[i] <= 0 || navmap.data[i] != maps.WALKABLE {
-					continue
-				}
-				if map_x.data[i] != f32(x) || map_y.data[i] != f32(y) {
-					continue
-				}
-				dir := flow.field.data[i]
-				if dir[0] == 0 && dir[1] == 0 {
-					continue
-				}
-				dx := int(math.round(dir[0]))
-				dy := int(math.round(dir[1]))
-				if dx == 0 && dy == 0 {
-					ax := dir[0]
-					if ax < 0 {
-						ax = -ax
-					}
-					ay := dir[1]
-					if ay < 0 {
-						ay = -ay
-					}
-					if ax >= ay {
-						if dir[0] > 0 {
-							dx = 1
-						} else {
-							dx = -1
-						}
-					} else {
-						if dir[1] > 0 {
-							dy = 1
-						} else {
-							dy = -1
-						}
-					}
-				}
-				dest := -1
-				candidates := [3][2]int{{dx, dy}, {dx, 0}, {0, dy}}
-				for c in candidates {
-					if c[0] == 0 && c[1] == 0 {
-						continue
-					}
-					nx := x + c[0]
-					ny := y + c[1]
-					if nx < 0 || ny < 0 || nx >= w || ny >= h {
-						continue
-					}
-					j := nx + ny * w
-					if navmap.data[j] != maps.WALKABLE || map_x.data[j] >= 0 {
-						continue
-					}
-					dest = j
-					break
-				}
-				if dest < 0 {
-					best := f32(-2)
-					sides := [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
-					for c in sides {
-						nx := x + c[0]
-						ny := y + c[1]
-						if nx < 0 || ny < 0 || nx >= w || ny >= h {
-							continue
-						}
-						j := nx + ny * w
-						if navmap.data[j] != maps.WALKABLE || map_x.data[j] >= 0 {
-							continue
-						}
-						along := f32(c[0]) * dir[0] + f32(c[1]) * dir[1]
-						if along > best {
-							best = along
-							dest = j
-						}
-					}
-				}
-				if dest < 0 {
-					continue
-				}
-				map_x.data[i] = -1
-				map_x.data[dest] = f32(x)
-				map_y.data[dest] = f32(y)
-				moved += 1
-			}
-		}
-		if moved == 0 {
-			break
-		}
-	}
-
-	for i in 0..<int(map_x.rows * map_x.cols) {
-		if map_x.data[i] < 0 {
-			map_x.data[i] = f32(trash % w)
-			map_y.data[i] = f32(trash / w)
-		}
-	}
-
+	cv.sub(origin_x, &flow.gx, map_x)
+	cv.sub(origin_y, &flow.gy, map_y)
+	// The trace runs to the midpoint and then takes one full step from there,
+	// which lands on the cell that actually steps into this destination instead
+	// of drifting off a curving flow.
+	cv.mul(&flow.gx, half, dir_x)
+	cv.mul(&flow.gy, half, dir_y)
+	cv.sub(origin_x, dir_x, map_x)
+	cv.sub(origin_y, dir_y, map_y)
+	cv.resample(&flow.gx, dir_x, map_x, map_y, cv.INTER_NEAREST)
+	cv.resample(&flow.gy, dir_y, map_x, map_y, cv.INTER_NEAREST)
+	cv.sub(origin_x, dir_x, map_x)
+	cv.sub(origin_y, dir_y, map_y)
 	cv.resample(units, scratch, map_x, map_y, cv.INTER_NEAREST)
-	copy(units.data[:w * h], scratch.data[:w * h])
+	cv.set_to(scratch, 0, &flow.wall_mask)
+	copy(units.data[0:int(units.rows * units.cols)], scratch.data[0:int(scratch.rows * scratch.cols)])
 }
 
 pipeline_step :: proc(s: ^Simulation, units: ^cv.Mat(f32) = nil) {
@@ -225,6 +135,6 @@ pipeline_step :: proc(s: ^Simulation, units: ^cv.Mat(f32) = nil) {
 	pipeline_masks(s)
 	pipeline_heat(s)
 	pipeline_flow(s)
-	resample_units(target, &s.units_next, s.navmap, &s.flow, &s.pipe.map_x, &s.pipe.map_y)
+	resample_units(target, &s.units_next, &s.flow, &s.pipe.map_x, &s.pipe.map_y, &s.pipe.half, &s.pipe.dir_x, &s.pipe.dir_y, &s.pipe.origin_x, &s.pipe.origin_y)
 }
 

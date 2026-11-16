@@ -285,29 +285,49 @@ pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
 	units, err_units := cv.mat_new(f32, size, size, context.temp_allocator)
 	scratch, err_scratch := cv.mat_new(f32, size, size, context.temp_allocator)
 	navmap, err_map := cv.mat_new(f32, size, size, context.temp_allocator)
-// resample_units reads only the navmap and the field, so the flow field is
-// assembled here rather than through nav.make, whose gradient scratch this test never runs.
-	flow_grid, err_flow := cv.mat_new([2]f32, size, size, context.temp_allocator)
+	// resample_units reads the per axis flow components and the wall mask, so
+	// those three images are filled here rather than going through nav.make,
+	// whose gradient scratch this test never runs.
+	gx, err_gx := cv.mat_new(f32, size, size, context.temp_allocator)
+	gy, err_gy := cv.mat_new(f32, size, size, context.temp_allocator)
+	wall_mask, err_wall := cv.mat_new(u8, size, size, context.temp_allocator)
+	origin_x, err_ox := cv.mat_new(f32, size, size, context.temp_allocator)
+	origin_y, err_oy := cv.mat_new(f32, size, size, context.temp_allocator)
+	dir_x, err_dx := cv.mat_new(f32, size, size, context.temp_allocator)
+	dir_y, err_dy := cv.mat_new(f32, size, size, context.temp_allocator)
+	half, err_half := cv.mat_new(f32, size, size, context.temp_allocator)
 	map_x := cv.mat_new(f32, size, size, context.temp_allocator)
 	map_y := cv.mat_new(f32, size, size, context.temp_allocator)
 	assert(
 		err_units == .None &&
 		err_scratch == .None &&
 		err_map == .None &&
-		err_flow == .None,
+		err_gx == .None &&
+		err_gy == .None &&
+		err_wall == .None &&
+		err_ox == .None &&
+		err_oy == .None &&
+		err_dx == .None &&
+		err_dy == .None &&
+		err_half == .None,
 	)
+	cv.identity_maps(&origin_x, &origin_y)
+	cv.fill(&half, 0.5)
 
 	for i in 0..<int(navmap.rows * navmap.cols) {
 		navmap.data[i] = maps.WALKABLE
-		flow_grid.data[i] = {1, 0}
+		gx.data[i] = 1
+		gy.data[i] = 0
 	}
 	flow := nav.FlowField {
-		navmap = navmap,
-		field  = flow_grid,
+		navmap   = navmap,
+		gx       = gx,
+		gy       = gy,
+		wall_mask = wall_mask,
 	}
 
 	cv.at(&units, 3, 3)^ = 1
-	resample_units(&units, &scratch, navmap, &flow, &map_x, &map_y)
+	resample_units(&units, &scratch, &flow, &map_x, &map_y, &half, &dir_x, &dir_y, &origin_x, &origin_y)
 
 	testing.expect(t, cv.at(&units, 4, 3)^ == 1, "the unit must move one cell along the flow")
 	testing.expect(t, cv.at(&units, 3, 3)^ == 0, "the unit must leave its old cell empty")
