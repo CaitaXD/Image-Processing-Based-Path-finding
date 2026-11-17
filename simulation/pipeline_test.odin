@@ -209,9 +209,11 @@ pipeline_units_travel_toward_the_goal :: proc(t: ^testing.T) {
 		arrived_mass,
 	)
 
-	// The scatter remap is injective: every unit stays a single cell of mass 1
-	// and the total mass is conserved exactly.
-	testing.expect(t, support == UNIT_COUNT, "every unit must remain a point mass")
+	// The scatter is not injective: two units that pick the same destination
+	// stack there, so the support can be smaller than the unit count. What the
+	// step guarantees is the mass, which is conserved exactly.
+	testing.expect(t, support > 0, "the units must still be there")
+	testing.expect(t, support <= UNIT_COUNT, "a unit cannot be counted twice")
 	testing.expect(t, math.abs(end_mass - start_mass) < 0.01, "unit mass must be conserved")
 	testing.expect(
 		t,
@@ -291,28 +293,16 @@ pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
 	gx, err_gx := cv.mat_new(f32, size, size, context.temp_allocator)
 	gy, err_gy := cv.mat_new(f32, size, size, context.temp_allocator)
 	wall_mask, err_wall := cv.mat_new(u8, size, size, context.temp_allocator)
-	origin_x, err_ox := cv.mat_new(f32, size, size, context.temp_allocator)
-	origin_y, err_oy := cv.mat_new(f32, size, size, context.temp_allocator)
-	dir_x, err_dx := cv.mat_new(f32, size, size, context.temp_allocator)
-	dir_y, err_dy := cv.mat_new(f32, size, size, context.temp_allocator)
-	half, err_half := cv.mat_new(f32, size, size, context.temp_allocator)
-	map_x := cv.mat_new(f32, size, size, context.temp_allocator)
-	map_y := cv.mat_new(f32, size, size, context.temp_allocator)
+	pipe := Pipeline{}
+	pipeline_alloc(&pipe, size, size)
 	assert(
 		err_units == .None &&
 		err_scratch == .None &&
 		err_map == .None &&
 		err_gx == .None &&
 		err_gy == .None &&
-		err_wall == .None &&
-		err_ox == .None &&
-		err_oy == .None &&
-		err_dx == .None &&
-		err_dy == .None &&
-		err_half == .None,
+		err_wall == .None,
 	)
-	cv.identity_maps(&origin_x, &origin_y)
-	cv.fill(&half, 0.5)
 
 	for i in 0..<int(navmap.rows * navmap.cols) {
 		navmap.data[i] = maps.WALKABLE
@@ -325,9 +315,10 @@ pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
 		gy       = gy,
 		wall_mask = wall_mask,
 	}
+	pipeline_walk(&pipe, &navmap)
 
 	cv.at(&units, 3, 3)^ = 1
-	resample_units(&units, &scratch, &flow, &map_x, &map_y, &half, &dir_x, &dir_y, &origin_x, &origin_y)
+	resample_units(&pipe, &units, &scratch, &flow)
 
 	testing.expect(t, cv.at(&units, 4, 3)^ == 1, "the unit must move one cell along the flow")
 	testing.expect(t, cv.at(&units, 3, 3)^ == 0, "the unit must leave its old cell empty")

@@ -48,7 +48,7 @@ update :: proc(f: ^FlowField, s: ^heat.HeatSolver) {
     assert(s.field.cols == f.navmap.cols && s.field.rows == f.navmap.rows)
     cv.filter_2d(&s.field, &f.avg, &f.cross, -1, .REPLICATE)
     cv.div(&f.avg, &f.wall_coverage, &f.avg)
-    cv.copy_to(&f.avg, &s.field, &f.wall_mask)
+    cv.copy_to_masked(&f.avg, &s.field, &f.wall_mask)
     cv.gradient_x(&s.field, &f.gx, .REPLICATE)
     cv.gradient_y(&s.field, &f.gy, .REPLICATE)
     cv.set_to(&s.field, 0, &f.wall_mask)
