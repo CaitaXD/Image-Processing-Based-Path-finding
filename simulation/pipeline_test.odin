@@ -209,11 +209,9 @@ pipeline_units_travel_toward_the_goal :: proc(t: ^testing.T) {
 		arrived_mass,
 	)
 
-	// The scatter is not injective: two units that pick the same destination
-	// stack there, so the support can be smaller than the unit count. What the
-	// step guarantees is the mass, which is conserved exactly.
-	testing.expect(t, support > 0, "the units must still be there")
-	testing.expect(t, support <= UNIT_COUNT, "a unit cannot be counted twice")
+	// The claim protocol is injective: every unit keeps its own cell or moves
+	// to an unclaimed one, so no two units ever share a cell.
+	testing.expect(t, support == UNIT_COUNT, "every unit must remain a point mass")
 	testing.expect(t, math.abs(end_mass - start_mass) < 0.01, "unit mass must be conserved")
 	testing.expect(
 		t,
@@ -318,7 +316,7 @@ pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
 	pipeline_walk(&pipe, &navmap)
 
 	cv.at(&units, 3, 3)^ = 1
-	resample_units(&pipe, &units, &scratch, &flow)
+	resample_units(&units, &scratch, navmap, &flow, &pipe.map_x, &pipe.map_y)
 
 	testing.expect(t, cv.at(&units, 4, 3)^ == 1, "the unit must move one cell along the flow")
 	testing.expect(t, cv.at(&units, 3, 3)^ == 0, "the unit must leave its old cell empty")

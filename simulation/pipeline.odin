@@ -21,6 +21,10 @@ Pipeline :: struct {
 
 	tmp: cv.Mat(f32), // general scratch; replaces the dedicated `weighted`
 
+	// Coordinate maps for the remap step (claim protocol).
+	map_x: cv.Mat(f32),
+	map_y: cv.Mat(f32),
+
 	// The nine moves a cell can make, in the order of move_dirs: the eight
 	// neighbours and staying put. Each image holds 1 where the cell takes that
 	// whole step.
@@ -86,6 +90,8 @@ pipeline_alloc :: proc(p: ^Pipeline, w, h: int) {
 	p.vert = cv.mat_new(f32, h, w)
 	p.horiz = cv.mat_new(f32, h, w)
 	p.tmp = cv.mat_new(f32, h, w)
+	p.map_x = cv.mat_new(f32, h, w)
+	p.map_y = cv.mat_new(f32, h, w)
 }
 
 pipeline_setup :: proc(s: ^Simulation) {
@@ -153,146 +159,137 @@ pipeline_flow :: proc(s: ^Simulation) {
 // Without the slide a unit that faces a wall freezes there for good, and the
 // flow of a heat field that is zero inside the walls points into a wall in a
 // good many cells.
-resample_units :: proc(p: ^Pipeline, units, scratch: ^cv.Mat(f32), flow: ^nav.FlowField) {
-	// The sign of each axis, and whether that axis moves at all: a diagonal cell
-	// has both, a straight one has one, and a cell with no flow has neither.
-	cv.threshold(&flow.gx, &p.ax_pos, 0.5, 1, cv.THRESH_BINARY)
-	cv.threshold(&flow.gx, &p.ax_neg, -0.5, 1, cv.THRESH_BINARY_INV)
-	cv.threshold(&flow.gy, &p.ay_pos, 0.5, 1, cv.THRESH_BINARY)
-	cv.threshold(&flow.gy, &p.ay_neg, -0.5, 1, cv.THRESH_BINARY_INV)
-	cv.add(&p.ax_pos, &p.ax_neg, &p.ax)
-	cv.add(&p.ay_pos, &p.ay_neg, &p.ay)
-	cv.threshold(&p.ax, &p.not_ax, 0.5, 1, cv.THRESH_BINARY_INV)
-	cv.threshold(&p.ay, &p.not_ay, 0.5, 1, cv.THRESH_BINARY_INV)
+resample_units :: proc(
+	units: ^cv.Mat(f32),
+	scratch: ^cv.Mat(f32),
+	navmap: cv.Mat(f32),
+	flow: ^nav.FlowField,
+	map_x, map_y: ^cv.Mat(f32),
+) {
+	w := int(navmap.cols)
+	h := int(navmap.rows)
 
-	// Open masks for the four axis moves (stored for reuse in the slides). A
-	// shift leaves the far edge untouched, so the image is filled with "closed"
-	// first and a step off the grid is not taken either.
-	dirs := move_dirs
-	for i in 0..<4 {
-		cv.fill(&p.open_axis[i], 0)
-		cv.shift_copy(&p.walk, -int(dirs[i][0]), -int(dirs[i][1]), &p.open_axis[i])
+	// Find a trash cell (a walkable cell for unclaimed destinations).
+	trash := 0
+	for i in 0..<w * h {
+		if navmap.data[i] == maps.WALKABLE {
+			trash = i
+			break
+		}
 	}
 
-	// The four straight moves, each taken where its own destination is open.
-	cv.mul(&p.ax_pos, &p.not_ay, &p.weights[0]) // east
-	cv.mul(&p.ax_neg, &p.not_ay, &p.weights[1]) // west
-	cv.mul(&p.ay_pos, &p.not_ax, &p.weights[2]) // south
-	cv.mul(&p.ay_neg, &p.not_ax, &p.weights[3]) // north
-	for i in 0..<4 {
-		cv.mul(&p.weights[i], &p.open_axis[i], &p.weights[i])
+	// Initialize maps to -1 (unclaimed).
+	for i in 0..<int(map_x.rows * map_x.cols) {
+		map_x.data[i] = -1
+		map_y.data[i] = 0
 	}
 
-	// The four diagonal moves, with their open masks computed on the fly into
-	// tmp and discarded once the weight is masked.
-	for i in 4..<8 {
-		cv.fill(&p.tmp, 0)
-		cv.shift_copy(&p.walk, -int(dirs[i][0]), -int(dirs[i][1]), &p.tmp)
-		if i == 4 { cv.mul(&p.ax_pos, &p.ay_pos, &p.weights[4]) }
-		if i == 5 { cv.mul(&p.ax_neg, &p.ay_pos, &p.weights[5]) }
-		if i == 6 { cv.mul(&p.ax_pos, &p.ay_neg, &p.weights[6]) }
-		if i == 7 { cv.mul(&p.ax_neg, &p.ay_neg, &p.weights[7]) }
-		cv.mul(&p.weights[i], &p.tmp, &p.weights[i])
+	// Every unit first claims its own cell (stay). A move overwrites the
+	// destination cell's entry, so a unit only moves if its destination is
+	// unclaimed. This makes the step injective: no two units share a cell.
+	for i in 0..<w * h {
+		if units.data[i] > 0 && navmap.data[i] == maps.WALKABLE {
+			map_x.data[i] = f32(i % w)
+			map_y.data[i] = f32(i / w)
+		}
 	}
 
-	// moved is 1 where one of the eight moves is taken, and free is its
-	// complement: the cells that have to settle for a slide. `moved` is
-	// overwritten in place to hold `free` from here on.
-	cv.max(&p.weights[0], &p.weights[1], &p.moved)
-	cv.max(&p.moved, &p.weights[2], &p.moved)
-	cv.max(&p.moved, &p.weights[3], &p.moved)
-	cv.max(&p.moved, &p.weights[4], &p.moved)
-	cv.max(&p.moved, &p.weights[5], &p.moved)
-	cv.max(&p.moved, &p.weights[6], &p.moved)
-	cv.max(&p.moved, &p.weights[7], &p.moved)
-	cv.threshold(&p.moved, &p.moved, 0.5, 1, cv.THRESH_BINARY_INV)
+	// For each unit, try moves in priority order.
+	for y in 0..<h {
+		for x in 0..<w {
+			i := x + y * w
+			if units.data[i] <= 0 || navmap.data[i] != maps.WALKABLE {
+				continue
+			}
 
-	// xs: the x part of the wanted move, where its axis neighbour is open.
-	// Recomputed on the fly (was a stored Mat) to save memory.
-	cv.mul(&p.ax_pos, &p.open_axis[0], &p.tmp)
-	cv.mul(&p.ax_neg, &p.open_axis[1], &p.free_no_x)
-	cv.max(&p.tmp, &p.free_no_x, &p.tmp)
-	cv.threshold(&p.tmp, &p.free_no_x, 0.5, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.moved, &p.free_no_x, &p.free_no_x)
+			dir_x := flow.gx.data[i]
+			dir_y := flow.gy.data[i]
+			dir := [2]f32{dir_x, dir_y}
 
-	// ys: the y part of the wanted move, where its axis neighbour is open.
-	cv.mul(&p.ay_pos, &p.open_axis[2], &p.tmp)
-	cv.mul(&p.ay_neg, &p.open_axis[3], &p.vert)
-	cv.max(&p.tmp, &p.vert, &p.tmp)
-	// free_no_x stays = free & !xs here; the !ys restriction is applied in the
-	// perpendicular section below, matching the original ordering.
+			// Quantize the flow to a whole-cell step.
+			dx := 0
+			dy := 0
+			if dir[0] > 0.5 { dx = 1 } else if dir[0] < -0.5 { dx = -1 }
+			if dir[1] > 0.5 { dy = 1 } else if dir[1] < -0.5 { dy = -1 }
+			if dx == 0 && dy == 0 {
+				if math.abs(dir[0]) >= math.abs(dir[1]) {
+					if dir[0] > 0 { dx = 1 } else if dir[0] < 0 { dx = -1 }
+				} else {
+					if dir[1] > 0 { dy = 1 } else if dir[1] < 0 { dy = -1 }
+				}
+			}
 
-	// A straight move is taken where its destination is open, and also where the
-	// wanted move was blocked but this axis of it is open: that is the slide
-	// along the wall. The y axis only slides where the x axis did not.
-	cv.max(&p.not_ay, &p.moved, &p.tmp)
-	cv.mul(&p.ax_pos, &p.open_axis[0], &p.weights[0])
-	cv.mul(&p.weights[0], &p.tmp, &p.weights[0])
-	cv.mul(&p.ax_neg, &p.open_axis[1], &p.weights[1])
-	cv.mul(&p.weights[1], &p.tmp, &p.weights[1])
+			// Try candidates in priority order: full, x-only, y-only.
+			dest := -1
+			candidates := [3][2]int{{dx, dy}, {dx, 0}, {0, dy}}
+			for c in candidates {
+				jx := x + c[0]
+				jy := y + c[1]
+				if jx < 0 || jy < 0 || jx >= w || jy >= h {
+					continue
+				}
+				j := jx + jy * w
+				if navmap.data[j] != maps.WALKABLE {
+					continue
+				}
+				if map_x.data[j] >= 0 {
+					continue
+				}
+				dest = j
+				break
+			}
 
-	cv.max(&p.not_ax, &p.free_no_x, &p.tmp)
-	cv.mul(&p.ay_pos, &p.open_axis[2], &p.weights[2])
-	cv.mul(&p.weights[2], &p.tmp, &p.weights[2])
-	cv.mul(&p.ay_neg, &p.open_axis[3], &p.weights[3])
-	cv.mul(&p.weights[3], &p.tmp, &p.weights[3])
+			// Perpendicular slide: the open axis neighbour best aligned with the flow.
+			if dest < 0 {
+				best := f32(-2)
+				sides := [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+				for c in sides {
+					jx := x + c[0]
+					jy := y + c[1]
+					if jx < 0 || jy < 0 || jx >= w || jy >= h {
+						continue
+					}
+					j := jx + jy * w
+					if navmap.data[j] != maps.WALKABLE {
+						continue
+					}
+					if map_x.data[j] >= 0 {
+						continue
+					}
+					along := f32(c[0]) * dir[0] + f32(c[1]) * dir[1]
+					if along > best {
+						best = along
+						dest = j
+					}
+				}
+			}
 
-	// A cell whose wanted move runs into a wall dead on, with both of its axes
-	// blocked, slides along the wall: the open side of the flow's other axis.
-	cv.mul(&p.ay, &p.not_ax, &p.vert)
-	cv.mul(&p.ax, &p.not_ay, &p.horiz)
-	// Recompute ys into tmp for the free_no_x restriction.
-	cv.mul(&p.ay_pos, &p.open_axis[2], &p.tmp)
-	cv.mul(&p.ay_neg, &p.open_axis[3], &p.vert)  // vert is free here (overwritten below)
-	cv.max(&p.tmp, &p.vert, &p.tmp)
-	cv.threshold(&p.tmp, &p.vert, 0.5, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.free_no_x, &p.vert, &p.free_no_x)
-	// vert/horiz recomputed for the perpendicular slide.
-	cv.mul(&p.ay, &p.not_ax, &p.vert)
-	cv.mul(&p.ax, &p.not_ay, &p.horiz)
-	cv.threshold(&flow.gx, &p.tmp, -1e-6, 1, cv.THRESH_BINARY)
-	cv.mul(&p.tmp, &p.open_axis[0], &p.tmp)
-	cv.mul(&p.tmp, &p.vert, &p.tmp)
-	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
-	cv.add(&p.weights[0], &p.tmp, &p.weights[0])
-	cv.threshold(&flow.gx, &p.tmp, -1e-6, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.tmp, &p.open_axis[1], &p.tmp)
-	cv.mul(&p.tmp, &p.vert, &p.tmp)
-	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
-	cv.add(&p.weights[1], &p.tmp, &p.weights[1])
-	cv.threshold(&flow.gy, &p.tmp, -1e-6, 1, cv.THRESH_BINARY)
-	cv.mul(&p.tmp, &p.open_axis[2], &p.tmp)
-	cv.mul(&p.tmp, &p.horiz, &p.tmp)
-	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
-	cv.add(&p.weights[2], &p.tmp, &p.weights[2])
-	cv.threshold(&flow.gy, &p.tmp, -1e-6, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.tmp, &p.open_axis[3], &p.tmp)
-	cv.mul(&p.tmp, &p.horiz, &p.tmp)
-	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
-	cv.add(&p.weights[3], &p.tmp, &p.weights[3])
+			if dest < 0 {
+				continue
+			}
 
-	// Whatever is left stays: a cell with no flow, and a cell whose every
-	// neighbour is a wall.
-	cv.add(&p.weights[0], &p.weights[1], &p.tmp)
-	cv.add(&p.tmp, &p.weights[2], &p.tmp)
-	cv.add(&p.tmp, &p.weights[3], &p.tmp)
-	cv.add(&p.tmp, &p.weights[4], &p.tmp)
-	cv.add(&p.tmp, &p.weights[5], &p.tmp)
-	cv.add(&p.tmp, &p.weights[6], &p.tmp)
-	cv.add(&p.tmp, &p.weights[7], &p.tmp)
-	cv.threshold(&p.tmp, &p.weights[8], 0.5, 1, cv.THRESH_BINARY_INV)
-
-	// Scatter: every move writes the mass of the cells that chose it into the
-	// destination image, offset by that move. The nine moves partition the grid,
-	// so every unit is written exactly once and the step conserves mass.
-	cv.fill(scratch, 0)
-	for i in 0..<9 {
-		cv.mul(units, &p.weights[i], &p.tmp)
-		cv.shift_add(&p.tmp, int(dirs[i][0]), int(dirs[i][1]), scratch)
+			// The unit leaves its own cell, so clear the stay entry there.
+			if dest != i {
+				map_x.data[i] = -1
+				map_y.data[i] = 0
+			}
+			map_x.data[dest] = f32(x)
+			map_y.data[dest] = f32(y)
+		}
 	}
 
-	cv.copy_to(scratch, units)
+	// Fill unclaimed destinations with trash.
+	for i in 0..<int(map_x.rows * map_x.cols) {
+		if map_x.data[i] < 0 {
+			map_x.data[i] = f32(trash % w)
+			map_y.data[i] = f32(trash / w)
+		}
+	}
+
+	cv.resample(units, scratch, map_x, map_y, cv.INTER_NEAREST)
+	copy(units.data[0:int(units.rows * units.cols)], scratch.data[0:int(scratch.rows * scratch.cols)])
 }
+
 
 pipeline_step :: proc(s: ^Simulation, units: ^cv.Mat(f32) = nil) {
 	target := units
@@ -303,5 +300,5 @@ pipeline_step :: proc(s: ^Simulation, units: ^cv.Mat(f32) = nil) {
 	pipeline_masks(s)
 	pipeline_heat(s)
 	pipeline_flow(s)
-	resample_units(s.pipe, target, &s.units_next, &s.flow)
+	resample_units(target, &s.units_next, s.navmap, &s.flow, &s.pipe.map_x, &s.pipe.map_y)
 }
