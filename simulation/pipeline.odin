@@ -40,7 +40,7 @@ Pipeline :: struct {
 	moved: cv.Mat(f32),
 
 	// Scratch for the slide steps.
-	free2:  cv.Mat(f32),
+	free_no_x:  cv.Mat(f32),
 	vert:   cv.Mat(f32),
 	horiz:  cv.Mat(f32),
 }
@@ -82,7 +82,7 @@ pipeline_alloc :: proc(p: ^Pipeline, w, h: int) {
 	p.not_ax = cv.mat_new(f32, h, w)
 	p.not_ay = cv.mat_new(f32, h, w)
 	p.moved = cv.mat_new(f32, h, w)
-	p.free2 = cv.mat_new(f32, h, w)
+	p.free_no_x = cv.mat_new(f32, h, w)
 	p.vert = cv.mat_new(f32, h, w)
 	p.horiz = cv.mat_new(f32, h, w)
 	p.tmp = cv.mat_new(f32, h, w)
@@ -210,16 +210,16 @@ resample_units :: proc(p: ^Pipeline, units, scratch: ^cv.Mat(f32), flow: ^nav.Fl
 	// xs: the x part of the wanted move, where its axis neighbour is open.
 	// Recomputed on the fly (was a stored Mat) to save memory.
 	cv.mul(&p.ax_pos, &p.open_axis[0], &p.tmp)
-	cv.mul(&p.ax_neg, &p.open_axis[1], &p.free2)
-	cv.max(&p.tmp, &p.free2, &p.tmp)
-	cv.threshold(&p.tmp, &p.free2, 0.5, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.moved, &p.free2, &p.free2)
+	cv.mul(&p.ax_neg, &p.open_axis[1], &p.free_no_x)
+	cv.max(&p.tmp, &p.free_no_x, &p.tmp)
+	cv.threshold(&p.tmp, &p.free_no_x, 0.5, 1, cv.THRESH_BINARY_INV)
+	cv.mul(&p.moved, &p.free_no_x, &p.free_no_x)
 
 	// ys: the y part of the wanted move, where its axis neighbour is open.
 	cv.mul(&p.ay_pos, &p.open_axis[2], &p.tmp)
 	cv.mul(&p.ay_neg, &p.open_axis[3], &p.vert)
 	cv.max(&p.tmp, &p.vert, &p.tmp)
-	// free2 stays = free & !xs here; the !ys restriction is applied in the
+	// free_no_x stays = free & !xs here; the !ys restriction is applied in the
 	// perpendicular section below, matching the original ordering.
 
 	// A straight move is taken where its destination is open, and also where the
@@ -231,7 +231,7 @@ resample_units :: proc(p: ^Pipeline, units, scratch: ^cv.Mat(f32), flow: ^nav.Fl
 	cv.mul(&p.ax_neg, &p.open_axis[1], &p.weights[1])
 	cv.mul(&p.weights[1], &p.tmp, &p.weights[1])
 
-	cv.max(&p.not_ax, &p.free2, &p.tmp)
+	cv.max(&p.not_ax, &p.free_no_x, &p.tmp)
 	cv.mul(&p.ay_pos, &p.open_axis[2], &p.weights[2])
 	cv.mul(&p.weights[2], &p.tmp, &p.weights[2])
 	cv.mul(&p.ay_neg, &p.open_axis[3], &p.weights[3])
@@ -241,34 +241,34 @@ resample_units :: proc(p: ^Pipeline, units, scratch: ^cv.Mat(f32), flow: ^nav.Fl
 	// blocked, slides along the wall: the open side of the flow's other axis.
 	cv.mul(&p.ay, &p.not_ax, &p.vert)
 	cv.mul(&p.ax, &p.not_ay, &p.horiz)
-	// Recompute ys into tmp for the free2 restriction.
+	// Recompute ys into tmp for the free_no_x restriction.
 	cv.mul(&p.ay_pos, &p.open_axis[2], &p.tmp)
 	cv.mul(&p.ay_neg, &p.open_axis[3], &p.vert)  // vert is free here (overwritten below)
 	cv.max(&p.tmp, &p.vert, &p.tmp)
 	cv.threshold(&p.tmp, &p.vert, 0.5, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.free2, &p.vert, &p.free2)
+	cv.mul(&p.free_no_x, &p.vert, &p.free_no_x)
 	// vert/horiz recomputed for the perpendicular slide.
 	cv.mul(&p.ay, &p.not_ax, &p.vert)
 	cv.mul(&p.ax, &p.not_ay, &p.horiz)
 	cv.threshold(&flow.gx, &p.tmp, -1e-6, 1, cv.THRESH_BINARY)
 	cv.mul(&p.tmp, &p.open_axis[0], &p.tmp)
 	cv.mul(&p.tmp, &p.vert, &p.tmp)
-	cv.mul(&p.tmp, &p.free2, &p.tmp)
+	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
 	cv.add(&p.weights[0], &p.tmp, &p.weights[0])
 	cv.threshold(&flow.gx, &p.tmp, -1e-6, 1, cv.THRESH_BINARY_INV)
 	cv.mul(&p.tmp, &p.open_axis[1], &p.tmp)
 	cv.mul(&p.tmp, &p.vert, &p.tmp)
-	cv.mul(&p.tmp, &p.free2, &p.tmp)
+	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
 	cv.add(&p.weights[1], &p.tmp, &p.weights[1])
 	cv.threshold(&flow.gy, &p.tmp, -1e-6, 1, cv.THRESH_BINARY)
 	cv.mul(&p.tmp, &p.open_axis[2], &p.tmp)
 	cv.mul(&p.tmp, &p.horiz, &p.tmp)
-	cv.mul(&p.tmp, &p.free2, &p.tmp)
+	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
 	cv.add(&p.weights[2], &p.tmp, &p.weights[2])
 	cv.threshold(&flow.gy, &p.tmp, -1e-6, 1, cv.THRESH_BINARY_INV)
 	cv.mul(&p.tmp, &p.open_axis[3], &p.tmp)
 	cv.mul(&p.tmp, &p.horiz, &p.tmp)
-	cv.mul(&p.tmp, &p.free2, &p.tmp)
+	cv.mul(&p.tmp, &p.free_no_x, &p.tmp)
 	cv.add(&p.weights[3], &p.tmp, &p.weights[3])
 
 	// Whatever is left stays: a cell with no flow, and a cell whose every
