@@ -19,24 +19,30 @@ Pipeline :: struct {
 	wall_mask: cv.Mat(f32),
 	walk:      cv.Mat(f32),
 
-	weighted: cv.Mat(f32),
-	tmp:      cv.Mat(f32),
+	tmp: cv.Mat(f32), // general scratch; replaces the dedicated `weighted`
 
 	// The nine moves a cell can make, in the order of move_dirs: the eight
 	// neighbours and staying put. Each image holds 1 where the cell takes that
 	// whole step.
 	weights: [9]cv.Mat(f32),
 
-	// open[i] is 1 where the destination of move_dirs[i] is inside the grid and
-	// not a wall.
-	open: [8]cv.Mat(f32),
+	// open_axis[i] is 1 where the destination of the i-th axis move (east,
+	// west, south, north) is inside the grid and not a wall. The diagonal
+	// open masks are computed on the fly into tmp.
+	open_axis: [4]cv.Mat(f32),
 
-	// The four signs of the flow, whether each axis moves at all, and the
-	// scratches the step works in.
+	// The four signs of the flow and whether each axis moves at all.
 	ax_pos, ax_neg, ay_pos, ay_neg: cv.Mat(f32),
 	ax, ay, not_ax, not_ay:         cv.Mat(f32),
-	moved, free, xs, ys, free2:     cv.Mat(f32),
-	vert, horiz:                    cv.Mat(f32),
+
+	// Holds `moved` (1 where a full move is taken) through step 4, then
+	// `free` (its complement) from step 5 onward; `moved` is not read again.
+	moved: cv.Mat(f32),
+
+	// Scratch for the slide steps.
+	free2:  cv.Mat(f32),
+	vert:   cv.Mat(f32),
+	horiz:  cv.Mat(f32),
 }
 
 // move_dirs is the (dx, dy) of each image in Pipeline.weights: east, west,
@@ -63,8 +69,8 @@ pipeline_alloc :: proc(p: ^Pipeline, w, h: int) {
 	for i in 0..<9 {
 		p.weights[i] = cv.mat_new(f32, h, w)
 	}
-	for i in 0..<8 {
-		p.open[i] = cv.mat_new(f32, h, w)
+	for i in 0..<4 {
+		p.open_axis[i] = cv.mat_new(f32, h, w)
 	}
 
 	p.ax_pos = cv.mat_new(f32, h, w)
@@ -76,13 +82,9 @@ pipeline_alloc :: proc(p: ^Pipeline, w, h: int) {
 	p.not_ax = cv.mat_new(f32, h, w)
 	p.not_ay = cv.mat_new(f32, h, w)
 	p.moved = cv.mat_new(f32, h, w)
-	p.free = cv.mat_new(f32, h, w)
-	p.xs = cv.mat_new(f32, h, w)
-	p.ys = cv.mat_new(f32, h, w)
 	p.free2 = cv.mat_new(f32, h, w)
 	p.vert = cv.mat_new(f32, h, w)
 	p.horiz = cv.mat_new(f32, h, w)
-	p.weighted = cv.mat_new(f32, h, w)
 	p.tmp = cv.mat_new(f32, h, w)
 }
 
@@ -163,33 +165,39 @@ resample_units :: proc(p: ^Pipeline, units, scratch: ^cv.Mat(f32), flow: ^nav.Fl
 	cv.threshold(&p.ax, &p.not_ax, 0.5, 1, cv.THRESH_BINARY_INV)
 	cv.threshold(&p.ay, &p.not_ay, 0.5, 1, cv.THRESH_BINARY_INV)
 
-	// Which destinations are open. A shift leaves the far edge untouched, so the
-	// image is filled with "closed" first and a step off the grid is not taken
-	// either.
+	// Open masks for the four axis moves (stored for reuse in the slides). A
+	// shift leaves the far edge untouched, so the image is filled with "closed"
+	// first and a step off the grid is not taken either.
 	dirs := move_dirs
-	for i in 0..<8 {
-		cv.fill(&p.open[i], 0)
-		cv.shift_copy(&p.walk, -int(dirs[i][0]), -int(dirs[i][1]), &p.open[i])
+	for i in 0..<4 {
+		cv.fill(&p.open_axis[i], 0)
+		cv.shift_copy(&p.walk, -int(dirs[i][0]), -int(dirs[i][1]), &p.open_axis[i])
 	}
 
-	// The eight moves, each taken where its own destination is open. A product
-	// of these 0/1 images is their overlap, so the diagonals are the two axes
-	// together and the straight moves are one axis on its own: a diagonal cell
-	// moves once instead of once per axis.
+	// The four straight moves, each taken where its own destination is open.
 	cv.mul(&p.ax_pos, &p.not_ay, &p.weights[0]) // east
 	cv.mul(&p.ax_neg, &p.not_ay, &p.weights[1]) // west
 	cv.mul(&p.ay_pos, &p.not_ax, &p.weights[2]) // south
 	cv.mul(&p.ay_neg, &p.not_ax, &p.weights[3]) // north
-	cv.mul(&p.ax_pos, &p.ay_pos, &p.weights[4]) // south east
-	cv.mul(&p.ax_neg, &p.ay_pos, &p.weights[5]) // south west
-	cv.mul(&p.ax_pos, &p.ay_neg, &p.weights[6]) // north east
-	cv.mul(&p.ax_neg, &p.ay_neg, &p.weights[7]) // north west
-	for i in 0..<8 {
-		cv.mul(&p.weights[i], &p.open[i], &p.weights[i])
+	for i in 0..<4 {
+		cv.mul(&p.weights[i], &p.open_axis[i], &p.weights[i])
+	}
+
+	// The four diagonal moves, with their open masks computed on the fly into
+	// tmp and discarded once the weight is masked.
+	for i in 4..<8 {
+		cv.fill(&p.tmp, 0)
+		cv.shift_copy(&p.walk, -int(dirs[i][0]), -int(dirs[i][1]), &p.tmp)
+		if i == 4 { cv.mul(&p.ax_pos, &p.ay_pos, &p.weights[4]) }
+		if i == 5 { cv.mul(&p.ax_neg, &p.ay_pos, &p.weights[5]) }
+		if i == 6 { cv.mul(&p.ax_pos, &p.ay_neg, &p.weights[6]) }
+		if i == 7 { cv.mul(&p.ax_neg, &p.ay_neg, &p.weights[7]) }
+		cv.mul(&p.weights[i], &p.tmp, &p.weights[i])
 	}
 
 	// moved is 1 where one of the eight moves is taken, and free is its
-	// complement: the cells that have to settle for a slide.
+	// complement: the cells that have to settle for a slide. `moved` is
+	// overwritten in place to hold `free` from here on.
 	cv.max(&p.weights[0], &p.weights[1], &p.moved)
 	cv.max(&p.moved, &p.weights[2], &p.moved)
 	cv.max(&p.moved, &p.weights[3], &p.moved)
@@ -197,58 +205,68 @@ resample_units :: proc(p: ^Pipeline, units, scratch: ^cv.Mat(f32), flow: ^nav.Fl
 	cv.max(&p.moved, &p.weights[5], &p.moved)
 	cv.max(&p.moved, &p.weights[6], &p.moved)
 	cv.max(&p.moved, &p.weights[7], &p.moved)
-	cv.threshold(&p.moved, &p.free, 0.5, 1, cv.THRESH_BINARY_INV)
+	cv.threshold(&p.moved, &p.moved, 0.5, 1, cv.THRESH_BINARY_INV)
 
-	// The two parts of the wanted move, each where its own axis neighbour is
-	// open. xs is tried before ys, the order the flow asks for them in.
-	cv.mul(&p.ax_pos, &p.open[0], &p.tmp)
-	cv.mul(&p.ax_neg, &p.open[1], &p.xs)
-	cv.max(&p.tmp, &p.xs, &p.xs)
-	cv.mul(&p.ay_pos, &p.open[2], &p.tmp)
-	cv.mul(&p.ay_neg, &p.open[3], &p.ys)
-	cv.max(&p.tmp, &p.ys, &p.ys)
+	// xs: the x part of the wanted move, where its axis neighbour is open.
+	// Recomputed on the fly (was a stored Mat) to save memory.
+	cv.mul(&p.ax_pos, &p.open_axis[0], &p.tmp)
+	cv.mul(&p.ax_neg, &p.open_axis[1], &p.free2)
+	cv.max(&p.tmp, &p.free2, &p.tmp)
+	cv.threshold(&p.tmp, &p.free2, 0.5, 1, cv.THRESH_BINARY_INV)
+	cv.mul(&p.moved, &p.free2, &p.free2)
+
+	// ys: the y part of the wanted move, where its axis neighbour is open.
+	cv.mul(&p.ay_pos, &p.open_axis[2], &p.tmp)
+	cv.mul(&p.ay_neg, &p.open_axis[3], &p.vert)
+	cv.max(&p.tmp, &p.vert, &p.tmp)
+	// free2 stays = free & !xs here; the !ys restriction is applied in the
+	// perpendicular section below, matching the original ordering.
 
 	// A straight move is taken where its destination is open, and also where the
 	// wanted move was blocked but this axis of it is open: that is the slide
 	// along the wall. The y axis only slides where the x axis did not.
-	cv.max(&p.not_ay, &p.free, &p.tmp)
-	cv.mul(&p.ax_pos, &p.open[0], &p.weights[0])
+	cv.max(&p.not_ay, &p.moved, &p.tmp)
+	cv.mul(&p.ax_pos, &p.open_axis[0], &p.weights[0])
 	cv.mul(&p.weights[0], &p.tmp, &p.weights[0])
-	cv.mul(&p.ax_neg, &p.open[1], &p.weights[1])
+	cv.mul(&p.ax_neg, &p.open_axis[1], &p.weights[1])
 	cv.mul(&p.weights[1], &p.tmp, &p.weights[1])
 
-	cv.threshold(&p.xs, &p.tmp, 0.5, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.free, &p.tmp, &p.free2)
 	cv.max(&p.not_ax, &p.free2, &p.tmp)
-	cv.mul(&p.ay_pos, &p.open[2], &p.weights[2])
+	cv.mul(&p.ay_pos, &p.open_axis[2], &p.weights[2])
 	cv.mul(&p.weights[2], &p.tmp, &p.weights[2])
-	cv.mul(&p.ay_neg, &p.open[3], &p.weights[3])
+	cv.mul(&p.ay_neg, &p.open_axis[3], &p.weights[3])
 	cv.mul(&p.weights[3], &p.tmp, &p.weights[3])
 
 	// A cell whose wanted move runs into a wall dead on, with both of its axes
 	// blocked, slides along the wall: the open side of the flow's other axis.
 	cv.mul(&p.ay, &p.not_ax, &p.vert)
 	cv.mul(&p.ax, &p.not_ay, &p.horiz)
-	cv.threshold(&p.ys, &p.tmp, 0.5, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.free2, &p.tmp, &p.free2)
-
+	// Recompute ys into tmp for the free2 restriction.
+	cv.mul(&p.ay_pos, &p.open_axis[2], &p.tmp)
+	cv.mul(&p.ay_neg, &p.open_axis[3], &p.vert)  // vert is free here (overwritten below)
+	cv.max(&p.tmp, &p.vert, &p.tmp)
+	cv.threshold(&p.tmp, &p.vert, 0.5, 1, cv.THRESH_BINARY_INV)
+	cv.mul(&p.free2, &p.vert, &p.free2)
+	// vert/horiz recomputed for the perpendicular slide.
+	cv.mul(&p.ay, &p.not_ax, &p.vert)
+	cv.mul(&p.ax, &p.not_ay, &p.horiz)
 	cv.threshold(&flow.gx, &p.tmp, -1e-6, 1, cv.THRESH_BINARY)
-	cv.mul(&p.tmp, &p.open[0], &p.tmp)
+	cv.mul(&p.tmp, &p.open_axis[0], &p.tmp)
 	cv.mul(&p.tmp, &p.vert, &p.tmp)
 	cv.mul(&p.tmp, &p.free2, &p.tmp)
 	cv.add(&p.weights[0], &p.tmp, &p.weights[0])
 	cv.threshold(&flow.gx, &p.tmp, -1e-6, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.tmp, &p.open[1], &p.tmp)
+	cv.mul(&p.tmp, &p.open_axis[1], &p.tmp)
 	cv.mul(&p.tmp, &p.vert, &p.tmp)
 	cv.mul(&p.tmp, &p.free2, &p.tmp)
 	cv.add(&p.weights[1], &p.tmp, &p.weights[1])
 	cv.threshold(&flow.gy, &p.tmp, -1e-6, 1, cv.THRESH_BINARY)
-	cv.mul(&p.tmp, &p.open[2], &p.tmp)
+	cv.mul(&p.tmp, &p.open_axis[2], &p.tmp)
 	cv.mul(&p.tmp, &p.horiz, &p.tmp)
 	cv.mul(&p.tmp, &p.free2, &p.tmp)
 	cv.add(&p.weights[2], &p.tmp, &p.weights[2])
 	cv.threshold(&flow.gy, &p.tmp, -1e-6, 1, cv.THRESH_BINARY_INV)
-	cv.mul(&p.tmp, &p.open[3], &p.tmp)
+	cv.mul(&p.tmp, &p.open_axis[3], &p.tmp)
 	cv.mul(&p.tmp, &p.horiz, &p.tmp)
 	cv.mul(&p.tmp, &p.free2, &p.tmp)
 	cv.add(&p.weights[3], &p.tmp, &p.weights[3])
@@ -269,8 +287,8 @@ resample_units :: proc(p: ^Pipeline, units, scratch: ^cv.Mat(f32), flow: ^nav.Fl
 	// so every unit is written exactly once and the step conserves mass.
 	cv.fill(scratch, 0)
 	for i in 0..<9 {
-		cv.mul(units, &p.weights[i], &p.weighted)
-		cv.shift_add(&p.weighted, int(dirs[i][0]), int(dirs[i][1]), scratch)
+		cv.mul(units, &p.weights[i], &p.tmp)
+		cv.shift_add(&p.tmp, int(dirs[i][0]), int(dirs[i][1]), scratch)
 	}
 
 	cv.copy_to(scratch, units)
