@@ -245,7 +245,8 @@ draw_markers :: proc(img: cv.Mat(f32), size: f32, color: rl.Color) {
             if img.data[x + y * int(img.cols)] <= 0 {
                 continue
             }
-            rl.DrawRectangle(cast(i32)(f32(x) + 0.5 - size / 2), cast(i32)(f32(y) + 0.5 - size / 2), cast(i32)size, cast(i32)size, color)
+            corner := [2]f32{f32(x) + 0.5, f32(y) + 0.5} - {size / 2, size / 2}
+            rl.DrawRectangleV(corner, {size, size}, color)
         }
     }
 }

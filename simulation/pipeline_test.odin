@@ -209,8 +209,8 @@ pipeline_units_travel_toward_the_goal :: proc(t: ^testing.T) {
 		arrived_mass,
 	)
 
-	// The claim protocol is injective: every unit keeps its own cell or moves
-	// to an unclaimed one, so no two units ever share a cell.
+	// The scatter remap is injective: every unit stays a single cell of mass 1
+	// and the total mass is conserved exactly.
 	testing.expect(t, support == UNIT_COUNT, "every unit must remain a point mass")
 	testing.expect(t, math.abs(end_mass - start_mass) < 0.01, "unit mass must be conserved")
 	testing.expect(
@@ -285,38 +285,29 @@ pipeline_resample_moves_one_cell :: proc(t: ^testing.T) {
 	units, err_units := cv.mat_new(f32, size, size, context.temp_allocator)
 	scratch, err_scratch := cv.mat_new(f32, size, size, context.temp_allocator)
 	navmap, err_map := cv.mat_new(f32, size, size, context.temp_allocator)
-	// resample_units reads the per axis flow components and the wall mask, so
-	// those three images are filled here rather than going through nav.make,
-	// whose gradient scratch this test never runs.
-	gx, err_gx := cv.mat_new(f32, size, size, context.temp_allocator)
-	gy, err_gy := cv.mat_new(f32, size, size, context.temp_allocator)
-	wall_mask, err_wall := cv.mat_new(u8, size, size, context.temp_allocator)
-	pipe := Pipeline{}
-	pipeline_alloc(&pipe, size, size)
+// resample_units reads only the navmap and the field, so the flow field is
+// assembled here rather than through nav.make, whose gradient scratch this test never runs.
+	flow_grid, err_flow := cv.mat_new([2]f32, size, size, context.temp_allocator)
+	map_x := cv.mat_new(f32, size, size, context.temp_allocator)
+	map_y := cv.mat_new(f32, size, size, context.temp_allocator)
 	assert(
 		err_units == .None &&
 		err_scratch == .None &&
 		err_map == .None &&
-		err_gx == .None &&
-		err_gy == .None &&
-		err_wall == .None,
+		err_flow == .None,
 	)
 
 	for i in 0..<int(navmap.rows * navmap.cols) {
 		navmap.data[i] = maps.WALKABLE
-		gx.data[i] = 1
-		gy.data[i] = 0
+		flow_grid.data[i] = {1, 0}
 	}
 	flow := nav.FlowField {
-		navmap   = navmap,
-		gx       = gx,
-		gy       = gy,
-		wall_mask = wall_mask,
+		navmap = navmap,
+		field  = flow_grid,
 	}
-	pipeline_walk(&pipe, &navmap)
 
 	cv.at(&units, 3, 3)^ = 1
-	resample_units(&units, &scratch, navmap, &flow, &pipe.map_x, &pipe.map_y)
+	resample_units(&units, &scratch, navmap, &flow, &map_x, &map_y)
 
 	testing.expect(t, cv.at(&units, 4, 3)^ == 1, "the unit must move one cell along the flow")
 	testing.expect(t, cv.at(&units, 3, 3)^ == 0, "the unit must leave its old cell empty")
