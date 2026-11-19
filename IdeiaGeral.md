@@ -2,7 +2,7 @@ Proposta da Atividade: Path-Finding de muitas unidades usando operacoes de proce
 
 Utilizando representacoes de grid para unidades e objetivos (imagens)
 
-Experimento 1: Usando OpenCV, nao utilize double buffering
+Experimento 1: Usando OpenCV
 
 1. Máscara (Input)  cv2.threshold (Isso deve tornar possivel utilizar a mesma imagem para unidades e objectivos)
 

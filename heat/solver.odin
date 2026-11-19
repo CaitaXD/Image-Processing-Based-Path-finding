@@ -7,7 +7,6 @@ import cv "../odin-opencv"
 HeatSolver :: struct {
     navmap:   cv.Mat(f32),
     field:    cv.Mat(f32),
-    tmp:      cv.Mat(f32),
     coverage: cv.Mat(f32),
     kernel:   cv.Mat(f32),
     keep:     f32,
@@ -24,7 +23,6 @@ solver :: proc(navmap: cv.Mat(f32), rate, decay: f32, allocator := context.alloc
     h := int(navmap.rows)
 
     s.field    = cv.mat_new(f32, h, w, allocator) or_return
-    s.tmp      = cv.mat_new(f32, h, w, allocator) or_return
     s.navmap   = cv.mat_new(f32, h, w, allocator) or_return
     s.coverage = cv.mat_new(f32, h, w, allocator) or_return
     s.kernel   = kernel(rate, decay, allocator)   or_return
@@ -36,8 +34,9 @@ solver :: proc(navmap: cv.Mat(f32), rate, decay: f32, allocator := context.alloc
     cv.filter_2d(&s.navmap, &s.coverage, &filter)
     cv.convert_to(&s.coverage, &s.coverage, cv.mat_type_of(f32), f64(1 / max(s.keep, f32(1e-6))))
 
-    cv.threshold(&s.navmap, &s.tmp, 0, 1e-6, .BINARY_INV)
-    cv.add(&s.coverage, &s.tmp, &s.coverage)
+    cv.threshold(&s.navmap, &s.field, 0, 1e-6, .BINARY_INV)
+    cv.add(&s.coverage, &s.field, &s.coverage)
+    cv.fill(&s.field, 0)
 
     return
 }
@@ -51,12 +50,9 @@ step :: proc(s: ^HeatSolver, source: ^cv.Mat(f32), substeps: int) {
 
     for _ in 0..<substeps {
         diffuse(s)
-
         if source != nil {
-            cv.add(&s.tmp, source, &s.tmp)
+            cv.add(&s.field, source, &s.field)
         }
-
-        s.field, s.tmp = s.tmp, s.field
     }
 }
 
@@ -97,9 +93,9 @@ seed_source :: proc(s: ^HeatSolver, source: cv.Mat(f32)) {
 
 @(private)
 diffuse :: proc(s: ^HeatSolver) {
-    cv.filter_2d(&s.field, &s.tmp, &s.kernel)
-    cv.div(&s.tmp, &s.coverage, &s.tmp)
-    cv.mul(&s.tmp, &s.navmap, &s.tmp)
+    cv.filter_2d(&s.field, &s.field, &s.kernel)
+    cv.div(&s.field, &s.coverage, &s.field)
+    cv.mul(&s.field, &s.navmap, &s.field)
 }
 
 @(private)

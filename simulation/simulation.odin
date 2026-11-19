@@ -19,7 +19,6 @@ GOAL_MARKER_PX :: 10
 SEED                 :: u64(42)
 UNIT_COUNT           :: 100
 HEAT_SUBSTEPS        :: 2
-HEAT_PREBAKE         :: 5000
 HEAT_RATE            :: 0.5
 HEAT_DECAY           :: 0.000002
 HEAT_SOURCE_RADIUS   :: f32(max(W, H))/2
@@ -85,7 +84,6 @@ reset :: proc(s: ^Simulation) {
     heat.seed_source(&s.heat, wash)
     s.flow = nav.make(s.navmap)
     pipeline_setup(s)
-    pipeline_prebake(s)
     nav.update(&s.flow, &s.heat)
 
     if s.map_tex.id != 0 {

@@ -75,11 +75,6 @@ pipeline_heat :: proc(s: ^Simulation) {
 	heat.step(&s.heat, &s.goal, HEAT_SUBSTEPS)
 }
 
-pipeline_prebake :: proc(s: ^Simulation) {
-	pipeline_masks(s)
-	heat.step(&s.heat, &s.goal, HEAT_PREBAKE)
-}
-
 pipeline_flow :: proc(s: ^Simulation) {
 	nav.update(&s.flow, &s.heat)
 }
